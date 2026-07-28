@@ -18,6 +18,7 @@ TEMP_FOLDER = BOT_FOLDER / "temp"
 CACHE_FOLDER = BOT_FOLDER / "cache"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
+TIKTOK_PHOTOS = TIKTOK_DOWNLOADS / "Photos"
 
 
 # ==========================================================
@@ -43,10 +44,13 @@ ALLOWED_USERS = {
 # ==========================================================
 
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
+MAX_TELEGRAM_PHOTO_SIZE = 10 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 600
 SEND_TIMEOUT = 300
 ENGINE_SELECTION_TTL = 10 * 60
 MAX_PENDING_SELECTIONS_PER_USER = 10
+CLEANUP_INTERVAL_SECONDS = 8 * 60 * 60
+CLEANUP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
@@ -56,4 +60,4 @@ FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 # ==========================================================
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"

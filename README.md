@@ -1,19 +1,21 @@
 # MediaLab
 
-Bot modular de descarga multimedia para Telegram. La versión actual se concentra en TikTok y permite elegir entre dos motores independientes:
+Bot modular de descarga multimedia para Telegram. La versión 2.2.0 concentra el soporte en TikTok y separa cada tipo de contenido:
 
-- **TikWM Original**, que solicita el archivo original mediante TikWM.
-- **yt-dlp**, que descarga con el motor oficial de Python y selecciona la mejor calidad disponible.
-
-Después de cada descarga, MediaLab muestra en Telegram el motor utilizado, el peso total del archivo y su resolución.
+- **Videos:** selector entre TikWM Original y yt-dlp.
+- **Publicaciones fotográficas `/photo/`:** descarga mediante gallery-dl y envío como álbum de Telegram.
+- **Limpieza automática:** elimina archivos enviados correctamente y limpia restos antiguos cada ocho horas.
 
 ## Estado del proyecto
 
 - Plataforma disponible: TikTok.
-- Selector de motores mediante botones en Telegram.
-- Descargas guardadas en `C:\MediaLab\Downloads\TikTok`.
+- Videos con selector de motores mediante botones.
+- Carruseles fotográficos enviados en grupos de hasta 10 imágenes.
+- Peso total y resolución de videos cuando están disponibles.
+- Borrado inmediato después de un envío exitoso.
+- Conservación de archivos cuando Telegram falla o el archivo supera el límite.
+- Limpieza preventiva cada 8 horas para archivos con más de 24 horas.
 - Usuarios permitidos configurables desde `.env`.
-- Preparado para incorporar Instagram, YouTube, Facebook y X en módulos separados.
 
 ## Estructura
 
@@ -27,22 +29,31 @@ C:\MediaLab
 │   ├── models.py
 │   ├── requirements.txt
 │   ├── utils.py
-│   └── engines
-│       ├── base.py
-│       └── tiktok
-│           ├── tikwm.py
-│           └── ytdlp.py
+│   ├── engines
+│   │   ├── base.py
+│   │   └── tiktok
+│   │       ├── tikwm.py
+│   │       └── ytdlp.py
+│   └── services
+│       ├── __init__.py
+│       ├── file_cleanup.py
+│       └── tiktok_photos.py
 ├── Cookies
 ├── Downloads
 │   └── TikTok
-└── Logs
+│       └── Photos
+├── Logs
+└── Tools
+    └── FFmpeg
 ```
+
+Los motores de video conservan su estructura. Las fotos y la limpieza se implementan como servicios independientes.
 
 ## Requisitos
 
 - Windows.
-- Python instalado y disponible con el comando `python`.
-- FFmpeg y `ffprobe` disponibles en `PATH`.
+- Python 3.8 o posterior.
+- FFmpeg y ffprobe disponibles en `PATH`.
 - Un bot creado con `@BotFather`.
 
 Comprueba las herramientas:
@@ -55,27 +66,37 @@ ffprobe -version
 
 ## Instalación
 
-Abre PowerShell:
+Dentro del entorno virtual:
 
 ```powershell
 cd C:\MediaLab\Bot
-python -m venv .venv
 & .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
-notepad .env
+python -m pip install --upgrade -r requirements.txt
 ```
 
-Dentro de `.env`, reemplaza el token de ejemplo:
+Dependencias principales:
+
+```text
+python-telegram-bot>=22.8,<23
+python-dotenv>=1.2.2,<2
+requests>=2.34.2,<3
+yt-dlp>=2026.7.4
+gallery-dl>=1.32.7,<2
+```
+
+`gallery-dl` se ejecuta únicamente al recibir una publicación fotográfica. No queda trabajando en segundo plano.
+
+## Configuración
+
+El archivo `Bot\.env` debe contener:
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=PEGA_AQUI_TU_TOKEN
+TELEGRAM_BOT_TOKEN=TU_TOKEN_REAL
 TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 FFPROBE_BINARY=ffprobe
 ```
 
-Nunca publiques el archivo `.env` ni el token del bot.
+Nunca publiques `.env`, cookies ni tokens.
 
 ## Iniciar MediaLab
 
@@ -87,147 +108,156 @@ python bot.py
 
 Para detenerlo, presiona `Ctrl + C`.
 
-## Uso en Telegram
+## Videos de TikTok
 
-1. Envía un enlace de TikTok.
-2. MediaLab mostrará dos botones:
+1. Envía un enlace de video.
+2. MediaLab mostrará:
    - `🌐 TikWM Original`
    - `🛠️ yt-dlp`
-3. Pulsa un motor.
-4. El bot descargará el video y mostrará:
-   - motor utilizado;
-   - peso total;
-   - resolución;
-   - título y autor cuando estén disponibles.
+3. Selecciona un motor.
+4. Telegram recibe el video.
+5. Cuando Telegram confirma el envío, MediaLab elimina el archivo local y lo registra en consola.
 
-Cada selector dura 10 minutos y solo puede usarse una vez. Esto evita descargas duplicadas por pulsaciones repetidas.
+Cuando el envío falla, el archivo se conserva para diagnóstico o reintento. Los videos que superan el límite configurado también permanecen en la computadora.
 
-## BotFather y los botones
+## Publicaciones fotográficas
 
-Los botones de motores **no se crean en BotFather**. Son botones en línea generados directamente por `python-telegram-bot` desde `handlers.py`.
-
-En BotFather solo es recomendable registrar los comandos visibles:
-
-1. Abre `@BotFather`.
-2. Envía `/setcommands`.
-3. Selecciona tu bot.
-4. Pega:
+Los enlaces que contienen `/photo/` no muestran el selector de video. MediaLab los procesa directamente con gallery-dl:
 
 ```text
-start - Iniciar MediaLab
-help - Mostrar ayuda
+Enlace /photo/
+└── gallery-dl
+    ├── descarga todas las imágenes
+    ├── crea álbumes de 2 a 10 fotos
+    ├── usa envío individual cuando solo existe una foto
+    └── elimina los archivos después de completar todos los envíos
 ```
 
-No necesitas crear comandos para TikWM o yt-dlp, porque se seleccionan mediante los botones que aparecen al enviar un enlace.
+Telegram admite hasta 10 elementos por álbum. Una publicación de 17 imágenes se divide en dos envíos: 10 y 7.
 
-## Cookies opcionales para yt-dlp
+Cada fotografía debe respetar el límite de 10 MB de Telegram. Si una imagen excede ese límite o el envío falla, los archivos se conservan temporalmente y el bot informa la carpeta local.
 
-Los videos públicos normalmente no necesitan cookies. Para casos que sí las requieran, coloca un archivo en formato Netscape dentro de:
+## Cookies opcionales
+
+Los contenidos públicos normalmente funcionan sin cookies. Cuando sean necesarias, coloca un archivo Netscape en:
 
 ```text
 C:\MediaLab\Cookies\tiktok.txt
 ```
 
-También se reconocen `cookies-tiktok.txt` y `cookies.txt`. La carpeta `Cookies` está excluida de Git para evitar publicar datos privados.
-
-## Dependencias
-
-`requirements.txt` usa versiones estables verificadas:
+También se reconocen:
 
 ```text
-python-telegram-bot>=22.8,<23
-python-dotenv>=1.2.2,<2
-requests>=2.34.2,<3
-yt-dlp>=2026.7.4
+cookies-tiktok.txt
+cookies.txt
 ```
 
-Para actualizarlas dentro del entorno virtual:
+El mismo archivo puede ser utilizado por yt-dlp y gallery-dl.
 
-```powershell
-python -m pip install --upgrade -r requirements.txt
+## Limpieza automática
+
+MediaLab aplica dos niveles de limpieza:
+
+### Después de un envío exitoso
+
+- Cierra el archivo.
+- Lo elimina de la computadora.
+- Registra la ruta y el tamaño en el log.
+- Intenta eliminar las carpetas temporales vacías.
+
+### Limpieza periódica
+
+- Se ejecuta al iniciar el bot.
+- Vuelve a ejecutarse cada 8 horas.
+- Examina únicamente `Downloads` y `Bot\temp`.
+- Borra archivos con más de 24 horas.
+- No carga videos o imágenes en RAM.
+- No ejecuta FFmpeg.
+- No necesita APScheduler ni otra dependencia de programación.
+
+Ejemplos de log:
+
+```text
+INFO | services.file_cleanup | Archivo enviado y eliminado: ...
+INFO | services.file_cleanup | Limpieza periódica terminada: 4 archivos eliminados, 90534122 bytes liberados.
 ```
 
-## Archivos grandes
+## Límites configurados
 
-MediaLab usa un límite configurado de 50 MB para el envío por Telegram. Cuando una descarga supera ese límite:
+En `Bot\config.py`:
 
-- el archivo permanece guardado en la computadora;
-- el bot informa el peso, la resolución y la ruta local;
-- no intenta enviarlo como video.
-
-El límite se encuentra en `Bot\config.py`.
-
-## Resolución
-
-MediaLab toma primero los metadatos del motor. Cuando no están disponibles, usa `ffprobe` para inspeccionar el archivo final. Si `ffprobe` no puede ejecutarse, el bot mostrará `No disponible` sin detener la descarga.
-
-## Seguridad
-
-El repositorio ignora automáticamente:
-
-- `.env`;
-- entornos virtuales;
-- cookies;
-- descargas;
-- registros;
-- archivos temporales de yt-dlp.
-
-Antes de publicar cambios, comprueba:
-
-```powershell
-git status
+```text
+Videos para Telegram: 50 MB
+Fotos para Telegram: 10 MB por imagen
+Tiempo de descarga: 10 minutos
+Intervalo de limpieza: 8 horas
+Retención de seguridad: 24 horas
 ```
 
-No confirmes archivos que contengan tokens, cookies o datos personales.
+## Seguridad de la limpieza
+
+El servicio solamente permite eliminar rutas ubicadas dentro de:
+
+```text
+C:\MediaLab\Downloads
+C:\MediaLab\Bot\temp
+```
+
+Una ruta fuera de esas carpetas se rechaza y se registra como error. Esto evita que un resultado defectuoso pueda borrar archivos ajenos al proyecto.
 
 ## Solución de problemas
 
-### El bot no encuentra el token
+### gallery-dl no está instalado
 
-Comprueba que exista:
-
-```text
-C:\MediaLab\Bot\.env
-```
-
-y que incluya:
-
-```dotenv
-TELEGRAM_BOT_TOKEN=TU_TOKEN_REAL
-```
-
-### `ffprobe` no se reconoce
-
-Comprueba:
+Dentro de `.venv`:
 
 ```powershell
-where.exe ffprobe
+python -m pip install --upgrade gallery-dl
+python -m gallery_dl --version
 ```
 
-Si no devuelve una ruta, revisa la instalación de FFmpeg o configura `FFPROBE_BINARY` con la ruta completa.
+### Una publicación `/photo/` no descarga
 
-### yt-dlp deja de descargar
-
-yt-dlp cambia con frecuencia. Actualízalo:
+Actualiza gallery-dl:
 
 ```powershell
-python -m pip install --upgrade yt-dlp
+python -m pip install --upgrade gallery-dl
 ```
 
-### El selector expiró
+Después prueba nuevamente. Algunos contenidos pueden requerir cookies.
 
-Envía otra vez el enlace. Los botones vencen después de 10 minutos y dejan de ser válidos después del primer uso.
+### El archivo no fue eliminado
+
+Revisa la consola. MediaLab conserva el archivo cuando:
+
+- Telegram no confirma el envío;
+- el archivo excede el límite;
+- Windows mantiene el archivo bloqueado;
+- la ruta no pertenece a las carpetas administradas.
+
+La limpieza periódica volverá a intentarlo después de que el archivo alcance 24 horas.
+
+### yt-dlp muestra `Unsupported URL` en `/photo/`
+
+Es esperado. Los enlaces fotográficos son desviados a gallery-dl antes de llegar a los motores de video.
 
 ## Desarrollo con ramas
 
-La rama `main` conserva la versión estable. Las mejoras se desarrollan en ramas separadas y se integran después de probarlas.
-
-Ejemplo:
+La rama estable es `main`. Esta actualización debe probarse primero en:
 
 ```text
-main
-└── feature/tiktok-engine-selector
+feature/tiktok-photos-cleanup
 ```
+
+Pruebas mínimas antes de integrar:
+
+1. Video con TikWM Original.
+2. Video con yt-dlp.
+3. Carrusel de 2 a 10 fotos.
+4. Carrusel de más de 10 fotos.
+5. Confirmar eliminación después de envío exitoso.
+6. Simular un fallo de Telegram y comprobar que los archivos permanezcan.
+7. Verificar que `git status` no incluya descargas, cookies ni `.env`.
 
 ## Uso responsable
 

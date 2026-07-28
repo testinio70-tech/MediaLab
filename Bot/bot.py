@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 
 from telegram import Update
 from telegram.ext import (
@@ -19,6 +21,7 @@ from handlers import (
     help_command,
     start,
 )
+from services.file_cleanup import periodic_cleanup_loop
 
 
 logging.basicConfig(
@@ -31,6 +34,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+_CLEANUP_TASK_KEY = "periodic_cleanup_task"
 
 
 async def error_handler(
@@ -53,10 +57,39 @@ async def error_handler(
             logger.exception("No se pudo enviar el mensaje de error a Telegram.")
 
 
+async def post_init(application: Application) -> None:
+    """Inicia el limpiador liviano sin agregar APScheduler."""
+
+    cleanup_task = asyncio.create_task(
+        periodic_cleanup_loop(),
+        name="medialab-periodic-cleanup",
+    )
+    application.bot_data[_CLEANUP_TASK_KEY] = cleanup_task
+    logger.info("Limpiador periódico iniciado: intervalo de 8 horas.")
+
+
+async def post_stop(application: Application) -> None:
+    """Cancela el limpiador para permitir un cierre ordenado."""
+
+    task = application.bot_data.pop(_CLEANUP_TASK_KEY, None)
+    if not isinstance(task, asyncio.Task):
+        return
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 def build_application() -> Application:
     """Construye y configura la aplicación de Telegram."""
 
-    application = Application.builder().token(TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .post_stop(post_stop)
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
