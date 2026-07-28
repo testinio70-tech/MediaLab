@@ -1,0 +1,30 @@
+# Secretos
+.env
+**/.env
+
+# Entornos virtuales
+.venv/
+**/.venv/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Archivos generados
+Downloads/
+Cookies/
+Logs/
+Bot/cache/
+Bot/logs/
+Bot/temp/
+*.log
+*.zip
+
+# Windows y editores
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
