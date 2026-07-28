@@ -44,3 +44,6 @@ class DownloadResult:
     error: str = ""
 
     thumbnail: str = ""
+
+    # Enlace externo temporal entregado por el motor, cuando está disponible.
+    direct_url: str = ""

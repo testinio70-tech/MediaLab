@@ -6,11 +6,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-# ==========================================================
-# Helpers de configuración
-# ==========================================================
-
-
 def _read_int_env(
     name: str,
     default: int,
@@ -21,12 +16,10 @@ def _read_int_env(
     raw_value = os.getenv(name, "").strip()
     if not raw_value:
         return default
-
     try:
         value = int(raw_value)
     except ValueError:
         return default
-
     value = max(value, minimum)
     if maximum is not None:
         value = min(value, maximum)
@@ -43,12 +36,10 @@ def _read_float_env(
     raw_value = os.getenv(name, "").strip()
     if not raw_value:
         return default
-
     try:
         value = float(raw_value)
     except ValueError:
         return default
-
     value = max(value, minimum)
     if maximum is not None:
         value = min(value, maximum)
@@ -59,7 +50,6 @@ def _read_bool_env(name: str, default: bool) -> bool:
     raw_value = os.getenv(name, "").strip().lower()
     if not raw_value:
         return default
-
     if raw_value in {"1", "true", "yes", "si", "sí", "on"}:
         return True
     if raw_value in {"0", "false", "no", "off"}:
@@ -80,42 +70,28 @@ def _read_user_ids(name: str) -> set[int]:
     return values
 
 
-# ==========================================================
-# Carpetas del proyecto
-# ==========================================================
-
 ROOT = Path(r"C:\MediaLab")
-
 BOT_FOLDER = ROOT / "Bot"
 DOWNLOADS_FOLDER = ROOT / "Downloads"
 COOKIES_FOLDER = ROOT / "Cookies"
 LOGS_FOLDER = ROOT / "Logs"
 TEMP_FOLDER = BOT_FOLDER / "temp"
 CACHE_FOLDER = BOT_FOLDER / "cache"
+STATE_FOLDER = BOT_FOLDER / "state"
+HEARTBEAT_FILE = STATE_FOLDER / "heartbeat.json"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
 TIKTOK_PHOTOS = TIKTOK_DOWNLOADS / "Photos"
 INSTAGRAM_DOWNLOADS = DOWNLOADS_FOLDER / "Instagram"
 
-
-# ==========================================================
-# Telegram
-# ==========================================================
-
 load_dotenv(BOT_FOLDER / ".env")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
 if not TOKEN:
     raise RuntimeError("No se encontró TELEGRAM_BOT_TOKEN.")
 
 ALLOWED_USERS = _read_user_ids("TELEGRAM_ALLOWED_USER_IDS")
 PRIVILEGED_USERS = _read_user_ids("TELEGRAM_PRIVILEGED_USER_IDS")
-
-
-# ==========================================================
-# Límites y tiempos de espera
-# ==========================================================
 
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
 MAX_TELEGRAM_PHOTO_SIZE = 10 * 1024 * 1024
@@ -127,41 +103,42 @@ CLEANUP_INTERVAL_SECONDS = 8 * 60 * 60
 CLEANUP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 DOWNLOAD_QUEUE_MAX_SIZE = _read_int_env(
-    "DOWNLOAD_QUEUE_MAX_SIZE",
-    10,
-    minimum=1,
-    maximum=100,
+    "DOWNLOAD_QUEUE_MAX_SIZE", 10, minimum=1, maximum=100
 )
 DOWNLOAD_QUEUE_WORKERS = _read_int_env(
-    "DOWNLOAD_QUEUE_WORKERS",
-    1,
-    minimum=1,
-    maximum=4,
+    "DOWNLOAD_QUEUE_WORKERS", 1, minimum=1, maximum=4
 )
 MAX_JOBS_PER_USER = _read_int_env(
-    "MAX_JOBS_PER_USER",
-    1,
-    minimum=1,
-    maximum=10,
+    "MAX_JOBS_PER_USER", 1, minimum=1, maximum=10
 )
 STATUS_MESSAGE_DELETE_DELAY = _read_float_env(
-    "STATUS_MESSAGE_DELETE_DELAY",
-    2.0,
-    minimum=0.0,
-    maximum=60.0,
+    "STATUS_MESSAGE_DELETE_DELAY", 2.0, minimum=0.0, maximum=60.0
 )
 
 INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS = _read_bool_env(
-    "INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS",
-    True,
+    "INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS", True
+)
+
+HEARTBEAT_WRITE_INTERVAL_SECONDS = _read_int_env(
+    "HEARTBEAT_WRITE_INTERVAL_SECONDS", 60, minimum=30, maximum=3600
+)
+WATCHDOG_CHECK_INTERVAL_SECONDS = _read_int_env(
+    "WATCHDOG_CHECK_INTERVAL_SECONDS", 300, minimum=60, maximum=3600
+)
+HEARTBEAT_STALE_SECONDS = _read_int_env(
+    "HEARTBEAT_STALE_SECONDS", 600, minimum=120, maximum=7200
+)
+SUPERVISOR_RESTART_DELAY_SECONDS = _read_int_env(
+    "SUPERVISOR_RESTART_DELAY_SECONDS", 10, minimum=1, maximum=300
+)
+SUPERVISOR_MAX_RESTARTS = _read_int_env(
+    "SUPERVISOR_MAX_RESTARTS", 5, minimum=1, maximum=50
+)
+SUPERVISOR_RESTART_WINDOW_SECONDS = _read_int_env(
+    "SUPERVISOR_RESTART_WINDOW_SECONDS", 600, minimum=60, maximum=86400
 )
 
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
-
-# ==========================================================
-# Aplicación
-# ==========================================================
-
 APP_NAME = "MediaLab"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0-alpha.1"

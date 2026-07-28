@@ -18,7 +18,6 @@ from config import (
 
 
 logger = logging.getLogger(__name__)
-
 JobRunner = Callable[[], Awaitable[None]]
 
 
@@ -42,9 +41,16 @@ class QueueReceipt:
     reason: str = ""
 
 
-class DownloadQueue:
-    """Cola global que limita descargas simultáneas y evita duplicados."""
+@dataclass(slots=True, frozen=True)
+class UserQueueSnapshot:
+    active: bool = False
+    waiting: bool = False
+    position: int = 0
+    platform: str = ""
+    label: str = ""
 
+
+class DownloadQueue:
     def __init__(
         self,
         *,
@@ -62,6 +68,7 @@ class DownloadQueue:
         self._keys: set[str] = set()
         self._user_counts: defaultdict[int, int] = defaultdict(int)
         self._active: dict[int, DownloadJob] = {}
+        self._waiting_order: list[DownloadJob] = []
         self._started = False
 
     @property
@@ -110,6 +117,7 @@ class DownloadQueue:
         async with self._lock:
             for job in waiting_jobs:
                 self._release_job(job)
+            self._waiting_order.clear()
 
         logger.info(
             "Cola de descargas detenida. Trabajos descartados: %s.",
@@ -127,13 +135,14 @@ class DownloadQueue:
             if self._user_counts[job.user_id] >= self.max_jobs_per_user:
                 return QueueReceipt(False, reason="user_limit")
 
-            total_jobs = self._queue.qsize() + len(self._active)
+            total_jobs = len(self._waiting_order) + len(self._active)
             if total_jobs >= self.max_size:
                 return QueueReceipt(False, reason="full")
 
             position = total_jobs
             self._keys.add(job.key)
             self._user_counts[job.user_id] += 1
+            self._waiting_order.append(job)
             self._queue.put_nowait(job)
 
         logger.info(
@@ -147,13 +156,39 @@ class DownloadQueue:
 
     async def snapshot(self) -> tuple[int, int]:
         async with self._lock:
-            return len(self._active), self._queue.qsize()
+            return len(self._active), len(self._waiting_order)
+
+    async def user_snapshot(self, user_id: int) -> UserQueueSnapshot:
+        async with self._lock:
+            for job in self._active.values():
+                if job.user_id == user_id:
+                    return UserQueueSnapshot(
+                        active=True,
+                        platform=job.platform,
+                        label=job.label,
+                    )
+
+            for position, job in enumerate(self._waiting_order, start=1):
+                if job.user_id == user_id:
+                    return UserQueueSnapshot(
+                        waiting=True,
+                        position=position,
+                        platform=job.platform,
+                        label=job.label,
+                    )
+
+        return UserQueueSnapshot()
 
     async def _worker(self, worker_id: int) -> None:
         while True:
             job = await self._queue.get()
 
             async with self._lock:
+                self._waiting_order = [
+                    waiting_job
+                    for waiting_job in self._waiting_order
+                    if waiting_job.key != job.key
+                ]
                 self._active[worker_id] = job
 
             try:

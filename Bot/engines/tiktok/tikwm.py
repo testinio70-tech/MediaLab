@@ -139,7 +139,7 @@ class TikWMEngine(DownloadEngine):
                     "origin_cover",
                 )
 
-                file_path = self._download_original_file(
+                file_path, direct_url = self._download_original_file(
                     urls=download_urls,
                     title=title,
                     author=author,
@@ -159,6 +159,7 @@ class TikWMEngine(DownloadEngine):
                     video_id=video_id,
                     url=clean_url,
                     thumbnail=thumbnail,
+                    direct_url=direct_url,
                 )
 
             except TikWMError as error:
@@ -259,7 +260,7 @@ class TikWMEngine(DownloadEngine):
         title: str,
         author: str,
         video_id: str,
-    ) -> Path:
+    ) -> tuple[Path, str]:
         stem = self._build_filename_stem(
             title=title,
             author=author,
@@ -313,7 +314,7 @@ class TikWMEngine(DownloadEngine):
                         )
 
                     partial_path.replace(destination)
-                    return destination
+                    return destination, media_url
 
             except (requests.RequestException, OSError, TikWMError) as error:
                 errors.append(str(error))

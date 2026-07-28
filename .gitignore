@@ -20,6 +20,7 @@ Logs/
 Bot/cache/
 Bot/logs/
 Bot/temp/
+Bot/state/
 *.log
 *.zip
 *.part

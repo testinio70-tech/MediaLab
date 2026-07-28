@@ -4,7 +4,8 @@ import asyncio
 import logging
 from contextlib import suppress
 
-from telegram import Update
+from telegram import BotCommand, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -16,13 +17,19 @@ from telegram.ext import (
 
 from config import APP_NAME, APP_VERSION, TOKEN
 from handlers import (
+    cancel_command,
     handle_link,
+    handle_navigation,
     handle_tiktok_engine_selection,
+    health_command,
     help_command,
+    menu_command,
     start,
+    status_command,
 )
 from services.download_queue import DOWNLOAD_QUEUE
 from services.file_cleanup import periodic_cleanup_loop
+from services.heartbeat import HEARTBEAT_SERVICE
 
 
 logging.basicConfig(
@@ -30,7 +37,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
-# Evita mostrar cada petición HTTP y, especialmente, el token en la consola.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -42,7 +48,12 @@ async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Registra errores inesperados sin apagar el bot."""
+    if isinstance(context.error, BadRequest):
+        message = str(context.error)
+        if "Query is too old" in message or "query id is invalid" in message:
+            logger.info("Callback expirado ignorado por el manejador global.")
+            return
+
     logger.exception(
         "Error no controlado al procesar una actualización.",
         exc_info=context.error,
@@ -58,19 +69,32 @@ async def error_handler(
 
 
 async def post_init(application: Application) -> None:
-    """Inicia la cola y el limpiador periódico."""
     await DOWNLOAD_QUEUE.start()
+    await HEARTBEAT_SERVICE.start()
 
     cleanup_task = asyncio.create_task(
         periodic_cleanup_loop(),
         name="medialab-periodic-cleanup",
     )
     application.bot_data[_CLEANUP_TASK_KEY] = cleanup_task
+
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Abrir MediaLab"),
+            BotCommand("menu", "Abrir el menú principal"),
+            BotCommand("status", "Ver el estado de tus trabajos"),
+            BotCommand("cancel", "Cancelar una selección pendiente"),
+            BotCommand("help", "Abrir la ayuda interactiva"),
+            BotCommand("health", "Estado técnico para superusuarios"),
+        ]
+    )
+
     logger.info("Limpiador periódico iniciado: intervalo de 8 horas.")
+    logger.info("Heartbeat iniciado: actualización cada 60 segundos.")
 
 
 async def post_stop(application: Application) -> None:
-    """Detiene la cola y el limpiador para cerrar de forma ordenada."""
+    await HEARTBEAT_SERVICE.stop()
     await DOWNLOAD_QUEUE.stop()
 
     task = application.bot_data.pop(_CLEANUP_TASK_KEY, None)
@@ -83,7 +107,6 @@ async def post_stop(application: Application) -> None:
 
 
 def build_application() -> Application:
-    """Construye y configura la aplicación de Telegram."""
     application = (
         Application.builder()
         .token(TOKEN)
@@ -93,11 +116,21 @@ def build_application() -> Application:
     )
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("health", health_command))
     application.add_handler(
         CallbackQueryHandler(
             handle_tiktok_engine_selection,
             pattern=r"^tikeng:",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_navigation,
+            pattern=r"^(menu|help):",
         )
     )
     application.add_handler(
@@ -112,7 +145,6 @@ def build_application() -> Application:
 
 
 def main() -> None:
-    """Punto de entrada de MediaLab."""
     print(f"✅ {APP_NAME} v{APP_VERSION} iniciado.")
     print("Presiona Ctrl + C para detenerlo.")
 

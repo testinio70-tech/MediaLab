@@ -18,16 +18,18 @@ from telegram import (
     Message,
     Update,
 )
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from config import (
     ALLOWED_USERS,
+    APP_VERSION,
     ENGINE_SELECTION_TTL,
     INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS,
     MAX_PENDING_SELECTIONS_PER_USER,
     MAX_TELEGRAM_FILE_SIZE,
     MAX_TELEGRAM_PHOTO_SIZE,
+    PRIVILEGED_USERS,
     SEND_TIMEOUT,
     STATUS_MESSAGE_DELETE_DELAY,
 )
@@ -38,6 +40,7 @@ from media_info import enrich_download_result, format_result_details
 from models import DownloadResult
 from services.download_queue import DOWNLOAD_QUEUE, DownloadJob, QueueReceipt
 from services.file_cleanup import delete_sent_file, delete_sent_files
+from services.heartbeat import HEARTBEAT_SERVICE
 from services.instagram import (
     InstagramDownloadResult,
     download_instagram_media,
@@ -53,6 +56,16 @@ from services.tiktok_photos import (
     is_tiktok_photo_url,
 )
 from services.tiktok_urls import resolve_tiktok_url
+from ui.menus import (
+    download_menu,
+    enhancement_menu,
+    feature_menu,
+    health_keyboard,
+    help_menu,
+    help_section,
+    main_menu,
+    status_keyboard,
+)
 from utils import detect_platform, extract_first_url, format_file_size
 
 
@@ -86,10 +99,16 @@ def _is_authorized(update: Update) -> bool:
     return user is not None and user.id in ALLOWED_USERS
 
 
+def _is_privileged(update: Update) -> bool:
+    user = update.effective_user
+    return user is not None and user.id in PRIVILEGED_USERS
+
+
 async def _reject_unauthorized(update: Update) -> None:
     if update.callback_query is not None:
-        await update.callback_query.answer(
-            "No tienes autorización para usar este bot.",
+        await _safe_answer_query(
+            update.callback_query,
+            text="No tienes autorización para usar este bot.",
             show_alert=True,
         )
         return
@@ -104,6 +123,13 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    await menu_command(update, context)
+
+
+async def menu_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     if not _is_authorized(update):
         await _reject_unauthorized(update)
         return
@@ -112,15 +138,11 @@ async def start(
     if message is None:
         return
 
-    await message.reply_text(
-        "✅ MediaLab está en línea.\n\n"
-        "Envíame un enlace compatible.\n\n"
-        "Plataformas disponibles:\n"
-        "• TikTok: videos y carruseles de fotos\n"
-        "• Instagram: Posts, Reels y carruseles individuales\n\n"
-        "Las solicitudes se procesan mediante una cola para evitar que "
-        "varias descargas saturen la computadora."
+    text, keyboard = main_menu(
+        APP_VERSION,
+        privileged=_is_privileged(update),
     )
+    await message.reply_text(text, reply_markup=keyboard)
 
 
 async def help_command(
@@ -135,24 +157,191 @@ async def help_command(
     if message is None:
         return
 
+    text, keyboard = help_menu()
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def status_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
     await message.reply_text(
-        "📥 MediaLab Downloader\n\n"
-        "TikTok:\n"
-        "• Videos con TikWM Original o yt-dlp\n"
-        "• Carruseles fotográficos con gallery-dl\n\n"
-        "Instagram:\n"
-        "• Posts /p/\n"
-        "• Reels /reel/\n"
-        "• Videos /tv/\n"
-        "• Carruseles de fotos y videos\n"
-        "• Máxima calidad que Instagram exponga\n\n"
-        "Mientras una solicitud está activa, no necesitas volver a enviar "
-        "el enlace. Los archivos enviados se eliminan de la PC y la limpieza "
-        "solo se registra en consola.\n\n"
-        "Comandos:\n"
-        "/start - Iniciar MediaLab\n"
-        "/help - Mostrar esta ayuda"
+        await _build_status_text(user.id),
+        reply_markup=status_keyboard(),
     )
+
+
+async def cancel_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    pending = _pending_requests(context)
+    pending_count = len(pending)
+    pending.clear()
+    context.user_data.pop("menu_mode", None)
+
+    if pending_count:
+        await message.reply_text(
+            "✅ Selección pendiente cancelada.\n\n"
+            "Las descargas que ya entraron a la cola continúan normalmente."
+        )
+        return
+
+    await message.reply_text(
+        "ℹ️ No tenías una selección pendiente.\n\n"
+        "Por seguridad, /cancel todavía no interrumpe una descarga activa."
+    )
+
+
+async def health_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    if not _is_privileged(update):
+        await message.reply_text(
+            "⛔ /health está disponible únicamente para superusuarios."
+        )
+        return
+
+    await message.reply_text(
+        await _build_health_text(),
+        reply_markup=health_keyboard(),
+    )
+
+
+async def handle_navigation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    data = str(query.data or "")
+
+    if data == "menu:main":
+        text, keyboard = main_menu(
+            APP_VERSION,
+            privileged=_is_privileged(update),
+        )
+    elif data == "menu:download":
+        text, keyboard = download_menu()
+    elif data == "menu:enhance":
+        text, keyboard = enhancement_menu()
+    elif data == "menu:status":
+        text = await _build_status_text(user.id)
+        keyboard = status_keyboard()
+    elif data == "menu:help" or data == "help:main":
+        text, keyboard = help_menu()
+    elif data == "menu:health":
+        if not _is_privileged(update):
+            await _safe_answer_query(
+                query,
+                text="Solo disponible para superusuarios.",
+                show_alert=True,
+            )
+            return
+        text = await _build_health_text()
+        keyboard = health_keyboard()
+    elif data.startswith("menu:feature:"):
+        text, keyboard = feature_menu(data.rsplit(":", 1)[-1])
+    elif data.startswith("help:"):
+        text, keyboard = help_section(data.split(":", 1)[1])
+    else:
+        text, keyboard = main_menu(
+            APP_VERSION,
+            privileged=_is_privileged(update),
+        )
+
+    if not await _safe_answer_query(query):
+        return
+
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def _build_status_text(user_id: int) -> str:
+    active, waiting = await DOWNLOAD_QUEUE.snapshot()
+    user_status = await DOWNLOAD_QUEUE.user_snapshot(user_id)
+
+    if user_status.active:
+        personal = (
+            "🟢 Tu solicitud se está procesando ahora.\n"
+            f"🌐 Plataforma: {user_status.platform}\n"
+            f"⚙️ Motor: {user_status.label}"
+        )
+    elif user_status.waiting:
+        personal = (
+            "🕒 Tu solicitud está esperando.\n"
+            f"📍 Posición: {user_status.position}\n"
+            f"🌐 Plataforma: {user_status.platform}\n"
+            f"⚙️ Motor: {user_status.label}"
+        )
+    else:
+        personal = "⚪ No tienes solicitudes activas ni pendientes."
+
+    return (
+        "📊 Estado de MediaLab\n\n"
+        "Cola de descargas:\n"
+        f"• Activas: {active}\n"
+        f"• Esperando: {waiting}\n\n"
+        f"{personal}"
+    )
+
+
+async def _build_health_text() -> str:
+    active, waiting = await DOWNLOAD_QUEUE.snapshot()
+    heartbeat = "activo" if HEARTBEAT_SERVICE.running else "detenido"
+
+    return (
+        "🩺 Estado técnico de MediaLab\n\n"
+        f"Versión: {APP_VERSION}\n"
+        f"Tiempo activo: {_format_duration(HEARTBEAT_SERVICE.uptime_seconds)}\n"
+        f"Heartbeat: {heartbeat}\n"
+        f"Descargas activas: {active}\n"
+        f"Descargas esperando: {waiting}\n\n"
+        "El supervisor externo revisará el heartbeat cada 5 minutos."
+    )
+
+
+def _format_duration(total_seconds: int) -> str:
+    hours, remainder = divmod(max(0, total_seconds), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours} h {minutes} min"
+    if minutes:
+        return f"{minutes} min {seconds} s"
+    return f"{seconds} s"
 
 
 # ==========================================================
@@ -583,7 +772,8 @@ async def handle_tiktok_engine_selection(
         await _reject_unauthorized(update)
         return
 
-    await query.answer()
+    if not await _safe_answer_query(query):
+        return
 
     parsed = _parse_callback_data(query.data)
     if parsed is None:
@@ -823,6 +1013,35 @@ async def _process_tiktok_video_job(
         return
 
     if not sent:
+        direct_url = result.direct_url.strip()
+        if (
+            result.engine == "TikWM Original"
+            and _is_safe_direct_download_url(direct_url)
+        ):
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬇️ Descargar original desde TikWM",
+                            url=direct_url,
+                        )
+                    ]
+                ]
+            )
+            await _safe_edit(
+                status_message,
+                "⚠️ El video original supera el límite de envío de Telegram.\n\n"
+                f"{format_result_details(result)}\n\n"
+                "Pulsa el botón para descargar el archivo original directamente "
+                "desde TikWM. El enlace es temporal; ábrelo lo antes posible.",
+                reply_markup=keyboard,
+            )
+            asyncio.create_task(
+                _delete_oversized_file_later(result.file_path),
+                name=f"delete-oversized-{result.video_id or int(time.time())}",
+            )
+            return
+
         await _safe_edit(
             status_message,
             "⚠️ El video fue descargado, pero supera el límite configurado "
@@ -1027,6 +1246,51 @@ def _format_instagram_details(result: InstagramDownloadResult) -> str:
     )
 
 
+def _is_safe_direct_download_url(url: str) -> bool:
+    if not url:
+        return False
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.lower() == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
+async def _delete_oversized_file_later(
+    path: Path | None,
+    delay_seconds: int = 10 * 60,
+) -> None:
+    if path is None:
+        return
+
+    await asyncio.sleep(delay_seconds)
+
+    try:
+        if path.is_file():
+            file_size = path.stat().st_size
+            path.unlink()
+            logger.info(
+                "Archivo sobredimensionado eliminado después de %s segundos: "
+                "%s (%s bytes)",
+                delay_seconds,
+                path,
+                file_size,
+            )
+    except OSError as error:
+        logger.warning(
+            "No se pudo eliminar el archivo sobredimensionado %s: %s",
+            path,
+            error,
+        )
+
+
 def _processing_text(engine_name: str, content_label: str) -> str:
     return (
         "⬇️ Procesando tu solicitud…\n\n"
@@ -1053,9 +1317,35 @@ def _job_key(user_id: int, url: str) -> str:
     return f"{user_id}:{canonical}"
 
 
-async def _safe_edit(message: Message, text: str) -> None:
+async def _safe_answer_query(
+    query: Any,
+    *,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> bool:
     try:
-        await message.edit_text(text)
+        await query.answer(text=text, show_alert=show_alert)
+        return True
+    except BadRequest as error:
+        message = str(error)
+        if "Query is too old" in message or "query id is invalid" in message:
+            logger.info("Callback expirado ignorado.")
+            return False
+        logger.warning("Telegram rechazó la respuesta del callback: %s", error)
+        return False
+    except TelegramError as error:
+        logger.warning("No se pudo responder el callback: %s", error)
+        return False
+
+
+async def _safe_edit(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
     except TelegramError as error:
         logger.debug("No se pudo editar el mensaje temporal: %s", error)
 
