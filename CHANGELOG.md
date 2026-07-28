@@ -1,4 +1,21 @@
-﻿# Historial de cambios
+# Historial de cambios
+
+## 2.3.0
+
+- Cola global de descargas para varios usuarios con uno o más trabajadores configurables.
+- Un solo trabajo activo o pendiente por usuario de forma predeterminada.
+- Protección contra enlaces duplicados y saturación de la cola.
+- Mensajes temporales con estados: en espera, descargando y enviando.
+- Eliminación automática del mensaje temporal después de un envío exitoso.
+- Los resultados de limpieza permanecen únicamente en la consola y en los logs.
+- Soporte para enlaces individuales de Instagram: publicaciones, Reels, videos y carruseles.
+- Descarga de Instagram mediante gallery-dl con API REST de mayor resolución.
+- Selección explícita de `bestvideo*+bestaudio/best` para videos de Instagram.
+- Fallback automático a yt-dlp cuando gallery-dl falla en Reels o videos.
+- Entrega de Instagram como documentos sin compresión de Telegram por defecto.
+- Cookies opcionales separadas para Instagram.
+- Preparación de una lista de usuarios privilegiados para funciones futuras.
+- Versión actualizada a MediaLab 2.3.0.
 
 ## 2.2.1
 
@@ -11,6 +28,7 @@
 - Envío de la URL final resuelta a TikWM Original y yt-dlp.
 - Fallback seguro al enlace original cuando TikTok no entrega una redirección válida.
 - Versión actualizada a MediaLab 2.2.1.
+
 ## 2.2.0
 
 - Detección de publicaciones fotográficas de TikTok mediante rutas `/photo/`.

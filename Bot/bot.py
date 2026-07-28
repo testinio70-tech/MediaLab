@@ -21,6 +21,7 @@ from handlers import (
     help_command,
     start,
 )
+from services.download_queue import DOWNLOAD_QUEUE
 from services.file_cleanup import periodic_cleanup_loop
 
 
@@ -42,7 +43,6 @@ async def error_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     """Registra errores inesperados sin apagar el bot."""
-
     logger.exception(
         "Error no controlado al procesar una actualización.",
         exc_info=context.error,
@@ -58,7 +58,8 @@ async def error_handler(
 
 
 async def post_init(application: Application) -> None:
-    """Inicia el limpiador liviano sin agregar APScheduler."""
+    """Inicia la cola y el limpiador periódico."""
+    await DOWNLOAD_QUEUE.start()
 
     cleanup_task = asyncio.create_task(
         periodic_cleanup_loop(),
@@ -69,7 +70,8 @@ async def post_init(application: Application) -> None:
 
 
 async def post_stop(application: Application) -> None:
-    """Cancela el limpiador para permitir un cierre ordenado."""
+    """Detiene la cola y el limpiador para cerrar de forma ordenada."""
+    await DOWNLOAD_QUEUE.stop()
 
     task = application.bot_data.pop(_CLEANUP_TASK_KEY, None)
     if not isinstance(task, asyncio.Task):
@@ -82,7 +84,6 @@ async def post_stop(application: Application) -> None:
 
 def build_application() -> Application:
     """Construye y configura la aplicación de Telegram."""
-
     application = (
         Application.builder()
         .token(TOKEN)
@@ -107,13 +108,11 @@ def build_application() -> Application:
     )
 
     application.add_error_handler(error_handler)
-
     return application
 
 
 def main() -> None:
     """Punto de entrada de MediaLab."""
-
     print(f"✅ {APP_NAME} v{APP_VERSION} iniciado.")
     print("Presiona Ctrl + C para detenerlo.")
 

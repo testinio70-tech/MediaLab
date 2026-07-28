@@ -1,7 +1,83 @@
-﻿from pathlib import Path
+from __future__ import annotations
+
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+# ==========================================================
+# Helpers de configuración
+# ==========================================================
+
+
+def _read_int_env(
+    name: str,
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
+def _read_float_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name, "").strip().lower()
+    if not raw_value:
+        return default
+
+    if raw_value in {"1", "true", "yes", "si", "sí", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _read_user_ids(name: str) -> set[int]:
+    values: set[int] = set()
+    for raw_value in os.getenv(name, "").split(","):
+        value = raw_value.strip()
+        if not value:
+            continue
+        try:
+            values.add(int(value))
+        except ValueError:
+            continue
+    return values
 
 
 # ==========================================================
@@ -19,6 +95,7 @@ CACHE_FOLDER = BOT_FOLDER / "cache"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
 TIKTOK_PHOTOS = TIKTOK_DOWNLOADS / "Photos"
+INSTAGRAM_DOWNLOADS = DOWNLOADS_FOLDER / "Instagram"
 
 
 # ==========================================================
@@ -32,11 +109,8 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("No se encontró TELEGRAM_BOT_TOKEN.")
 
-ALLOWED_USERS = {
-    int(value.strip())
-    for value in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",")
-    if value.strip()
-}
+ALLOWED_USERS = _read_user_ids("TELEGRAM_ALLOWED_USER_IDS")
+PRIVILEGED_USERS = _read_user_ids("TELEGRAM_PRIVILEGED_USER_IDS")
 
 
 # ==========================================================
@@ -52,6 +126,36 @@ MAX_PENDING_SELECTIONS_PER_USER = 10
 CLEANUP_INTERVAL_SECONDS = 8 * 60 * 60
 CLEANUP_MAX_AGE_SECONDS = 24 * 60 * 60
 
+DOWNLOAD_QUEUE_MAX_SIZE = _read_int_env(
+    "DOWNLOAD_QUEUE_MAX_SIZE",
+    10,
+    minimum=1,
+    maximum=100,
+)
+DOWNLOAD_QUEUE_WORKERS = _read_int_env(
+    "DOWNLOAD_QUEUE_WORKERS",
+    1,
+    minimum=1,
+    maximum=4,
+)
+MAX_JOBS_PER_USER = _read_int_env(
+    "MAX_JOBS_PER_USER",
+    1,
+    minimum=1,
+    maximum=10,
+)
+STATUS_MESSAGE_DELETE_DELAY = _read_float_env(
+    "STATUS_MESSAGE_DELETE_DELAY",
+    2.0,
+    minimum=0.0,
+    maximum=60.0,
+)
+
+INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS = _read_bool_env(
+    "INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS",
+    True,
+)
+
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
 
@@ -60,4 +164,4 @@ FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 # ==========================================================
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.3.0"
