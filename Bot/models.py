@@ -29,6 +29,14 @@ class DownloadResult:
 
     file_size: int = 0
 
+    width: int = 0
+
+    height: int = 0
+
+    duration: float = 0.0
+
+    extension: str = ""
+
     video_id: str = ""
 
     url: str = ""

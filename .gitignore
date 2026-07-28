@@ -22,6 +22,9 @@ Bot/logs/
 Bot/temp/
 *.log
 *.zip
+*.part
+*.ytdl
+*.tmp
 
 # Windows y editores
 Thumbs.db

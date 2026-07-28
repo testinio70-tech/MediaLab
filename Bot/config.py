@@ -45,6 +45,10 @@ ALLOWED_USERS = {
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 600
 SEND_TIMEOUT = 300
+ENGINE_SELECTION_TTL = 10 * 60
+MAX_PENDING_SELECTIONS_PER_USER = 10
+
+FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
 
 # ==========================================================
@@ -52,4 +56,4 @@ SEND_TIMEOUT = 300
 # ==========================================================
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"

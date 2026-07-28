@@ -5,6 +5,7 @@ import logging
 from telegram import Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -12,7 +13,12 @@ from telegram.ext import (
 )
 
 from config import APP_NAME, APP_VERSION, TOKEN
-from handlers import handle_link, help_command, start
+from handlers import (
+    handle_link,
+    handle_tiktok_engine_selection,
+    help_command,
+    start,
+)
 
 
 logging.basicConfig(
@@ -54,6 +60,12 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_tiktok_engine_selection,
+            pattern=r"^tikeng:",
+        )
+    )
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
