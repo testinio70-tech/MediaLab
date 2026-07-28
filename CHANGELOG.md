@@ -1,5 +1,16 @@
-# Historial de cambios
+﻿# Historial de cambios
 
+## 2.2.1
+
+- Impersonación de navegador Chrome para yt-dlp mediante `curl_cffi`.
+- Resolución de desafíos JavaScript de TikTok y reducción de errores HTTP 403.
+- Dependencias completas de yt-dlp guardadas en `requirements.txt`.
+- Resolución automática de enlaces cortos de TikTok antes de clasificarlos.
+- Compatibilidad con `www.tiktok.com/t/`, `vm.tiktok.com` y `vt.tiktok.com`.
+- Detección correcta de carruseles `/photo/` compartidos mediante enlaces cortos.
+- Envío de la URL final resuelta a TikWM Original y yt-dlp.
+- Fallback seguro al enlace original cuando TikTok no entrega una redirección válida.
+- Versión actualizada a MediaLab 2.2.1.
 ## 2.2.0
 
 - Detección de publicaciones fotográficas de TikTok mediante rutas `/photo/`.

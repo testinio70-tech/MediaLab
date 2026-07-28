@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import os
 
 from dotenv import load_dotenv
@@ -60,4 +60,4 @@ FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 # ==========================================================
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"

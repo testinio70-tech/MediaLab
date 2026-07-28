@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import secrets
@@ -34,6 +34,7 @@ from services.tiktok_photos import (
     download_tiktok_photos,
     is_tiktok_photo_url,
 )
+from services.tiktok_urls import resolve_tiktok_url
 from utils import (
     detect_platform,
     extract_first_url,
@@ -250,6 +251,9 @@ async def handle_link(
 
     platform = detect_platform(url)
 
+    if platform == "tiktok":
+        url = await resolve_tiktok_url(url)
+
     if platform == "tiktok" and is_tiktok_photo_url(url):
         await _handle_tiktok_photo_post(message, url)
         return
@@ -408,6 +412,8 @@ async def handle_tiktok_engine_selection(
             "❌ No se pudo recuperar el enlace de TikTok."
         )
         return
+
+    url = await resolve_tiktok_url(url)
 
     await query.edit_message_text(
         f"⏳ Descargando con {engine.name}..."

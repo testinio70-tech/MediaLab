@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from yt_dlp import YoutubeDL
+from yt_dlp.networking.impersonate import ImpersonateTarget
 from yt_dlp.utils import DownloadError
 
 from config import COOKIES_FOLDER, DOWNLOAD_TIMEOUT, TIKTOK_DOWNLOADS
@@ -127,6 +128,7 @@ class TikTokYTDLPEngine(DownloadEngine):
 
     def _build_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
+            "impersonate": ImpersonateTarget.from_str("chrome"),
             "format": "bestvideo*+bestaudio/best",
             "outtmpl": str(
                 TIKTOK_DOWNLOADS
