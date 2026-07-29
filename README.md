@@ -1,6 +1,6 @@
 # MediaLab
 
-Bot modular de descarga y mejora multimedia para Telegram. MediaLab 2.4.0-alpha.3 admite TikTok e Instagram, incorpora colas separadas para descargas y mejoras, y añade restauración integral de video hasta 1080p.
+Bot modular de descarga y mejora multimedia para Telegram. MediaLab 2.4.0-alpha.4 admite TikTok e Instagram, incorpora colas separadas para descargas y mejoras, y añade restauración integral protegida de video hasta 1080p.
 
 ## Plataformas y contenido
 
@@ -23,13 +23,15 @@ Bot modular de descarga y mejora multimedia para Telegram. MediaLab 2.4.0-alpha.
 El comando `/restorevideo` abre una herramienta experimental que procesa todos los
 fotogramas del video:
 
-- detecta trazos con forma de texto superpuesto mediante OpenCV;
-- reconstruye máscaras pequeñas con inpainting;
+- detecta regiones de texto con PP-OCRv3 y OpenCV DNN;
+- segmenta la persona con PP-HumanSeg y amplía su silueta de seguridad;
+- reconstruye únicamente texto confirmado que no cruza rostro, cabello ni cuerpo;
 - corrige de forma temporal temperatura, balance de blancos y saturación;
-- aplica contraste local, reducción ligera de ruido y enfoque moderado;
+- limpia ruido y aplica microenfoque suave exclusivamente fuera de la persona;
 - conserva la resolución original en **Natural** y **Natural HD**;
 - permite ampliar hasta 1920×1080 o 1080×1920 en **Natural HD+**;
-- copia el audio original cuando su códec es compatible con MP4.
+- copia el audio original cuando su códec es compatible con MP4;
+- muestra el avance fotograma por fotograma en Telegram.
 
 Los tres acabados disponibles son:
 
@@ -39,10 +41,14 @@ Natural HD  -> texto + color + mejora suave
 Natural HD+ -> lo anterior y ampliación máxima a 1080p
 ```
 
-La detección de esta versión es deliberadamente conservadora. Si una máscara
-ocupa una parte demasiado grande del fotograma, se descarta para evitar dañar la
-imagen. Puede omitir letras difíciles y funciona mejor con subtítulos o textos
-contrastados sobrepuestos al video.
+La detección de esta versión prioriza la identidad. Si una letra cruza la
+persona, MediaLab conserva esa porción antes que inventar piel, facciones,
+cabello, manos o anatomía. Los modelos se ejecutan localmente y no se usa
+restauración facial generativa.
+
+Un video extremadamente pequeño o pixelado puede limpiarse y ampliarse, pero no
+contiene detalle real suficiente para recuperar una cara perdida. Natural HD+
+no presenta estimaciones generativas como si fueran información original.
 
 ## Cola multiusuario
 
@@ -162,13 +168,15 @@ RESTORE_MAX_DURATION_SECONDS=60
 RESTORE_TARGET_SIZE_MB=44
 RESTORE_PROCESS_TIMEOUT_SECONDS=1800
 RESTORE_MAX_TEXT_MASK_PERCENT=10
+RESTORE_TEXT_CONFIDENCE=0.68
+RESTORE_PERSON_PROTECTION_PERCENT=1.5
 STATUS_MESSAGE_DELETE_DELAY=2
 INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS=true
 FFMPEG_BINARY=ffmpeg
 FFPROBE_BINARY=ffprobe
 ```
 
-`TELEGRAM_PRIVILEGED_USER_IDS` queda preparado para funciones futuras como Stories o herramientas administrativas. MediaLab 2.4.0-alpha.3 no habilita descargas masivas ni perfiles completos.
+`TELEGRAM_PRIVILEGED_USER_IDS` queda preparado para funciones futuras como Stories o herramientas administrativas. MediaLab 2.4.0-alpha.4 no habilita descargas masivas ni perfiles completos.
 
 ## Cookies opcionales
 

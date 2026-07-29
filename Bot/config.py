@@ -80,6 +80,13 @@ CACHE_FOLDER = BOT_FOLDER / "cache"
 STATE_FOLDER = BOT_FOLDER / "state"
 FAST1080_FOLDER = TEMP_FOLDER / "Fast1080"
 RESTORE_FOLDER = TEMP_FOLDER / "RestoreHD"
+MODEL_FOLDER = BOT_FOLDER / "models"
+RESTORE_TEXT_MODEL = (
+    MODEL_FOLDER / "text_detection_en_ppocrv3_2023may.onnx"
+)
+RESTORE_PERSON_MODEL = (
+    MODEL_FOLDER / "human_segmentation_pphumanseg_2023mar.onnx"
+)
 HEARTBEAT_FILE = STATE_FOLDER / "heartbeat.json"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
@@ -155,6 +162,12 @@ RESTORE_PROCESS_TIMEOUT_SECONDS = _read_int_env(
 RESTORE_MAX_TEXT_MASK_PERCENT = _read_float_env(
     "RESTORE_MAX_TEXT_MASK_PERCENT", 10.0, minimum=1.0, maximum=25.0
 )
+RESTORE_TEXT_CONFIDENCE = _read_float_env(
+    "RESTORE_TEXT_CONFIDENCE", 0.68, minimum=0.30, maximum=0.98
+)
+RESTORE_PERSON_PROTECTION_PERCENT = _read_float_env(
+    "RESTORE_PERSON_PROTECTION_PERCENT", 1.5, minimum=0.5, maximum=5.0
+)
 
 STATUS_MESSAGE_DELETE_DELAY = _read_float_env(
     "STATUS_MESSAGE_DELETE_DELAY", 2.0, minimum=0.0, maximum=60.0
@@ -187,4 +200,4 @@ FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg"
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.4.0-alpha.3"
+APP_VERSION = "2.4.0-alpha.4"

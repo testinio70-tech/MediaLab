@@ -1,5 +1,21 @@
 # Historial de cambios
 
+## 2.4.0-alpha.4
+
+- Sustitución del detector heurístico de bordes por PP-OCRv3 de OpenCV Zoo.
+- Protección fotograma por fotograma de rostro, cabello, manos y cuerpo con
+  PP-HumanSeg antes de construir cualquier máscara de texto.
+- Regla de identidad bloqueada: la reconstrucción nunca puede intersectar la
+  silueta humana protegida.
+- Eliminación del contraste local CLAHE y del enfoque global que amplificaban
+  grano, halos y defectos de compresión.
+- Limpieza y microenfoque suave aplicados solamente al fondo.
+- Codificación de restauraciones con libx264 `slow` para priorizar calidad.
+- Mensajes de Telegram con advertencia de proceso lento, etapa y porcentaje.
+- Modelos ONNX locales, huellas SHA-256 y licencia Apache 2.0 documentados.
+- Pruebas de exclusión de personas, modelos DNN, progreso, audio, dimensiones
+  y procesamiento integral.
+
 ## 2.4.0-alpha.3
 
 - Nuevo comando `/restorevideo` y acceso desde el menú de mejoras.

@@ -11,8 +11,11 @@ from pathlib import Path
 os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
 
 from services.video_restore import (  # noqa: E402
+    ConservativeBackgroundEnhancer,
     RESTORATION_PROFILES,
     OverlayTextDetector,
+    PersonProtectionSegmenter,
+    RestorationProgress,
     TemporalNaturalColor,
     VIDEO_RESTORER,
     _parse_rate,
@@ -76,6 +79,34 @@ class VideoRestoreFrameTests(unittest.TestCase):
         self.assertGreater(coverage, 0.0005)
         self.assertLess(coverage, 0.10)
 
+    def test_text_detector_never_masks_protected_person_pixels(self) -> None:
+        frame = np.full((360, 640, 3), 42, dtype=np.uint8)
+        cv2.putText(
+            frame,
+            "@IDENTIDAD_PROTEGIDA",
+            (90, 190),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.82,
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+        )
+        protected = np.full((360, 640), 255, dtype=np.uint8)
+        detector = OverlayTextDetector(max_mask_fraction=0.10)
+
+        mask = detector.detect(frame, protected_mask=protected)
+
+        self.assertEqual(int(np.count_nonzero(mask)), 0)
+
+    def test_person_protection_model_returns_a_safe_mask(self) -> None:
+        frame = np.full((240, 320, 3), 80, dtype=np.uint8)
+        segmenter = PersonProtectionSegmenter(margin_fraction=0.015)
+
+        mask = segmenter.detect(frame)
+
+        self.assertEqual(mask.shape, frame.shape[:2])
+        self.assertEqual(mask.dtype, np.uint8)
+
     def test_color_restoration_reduces_a_warm_cast(self) -> None:
         frame = np.empty((180, 320, 3), dtype=np.uint8)
         frame[:, :] = (78, 145, 218)
@@ -87,6 +118,50 @@ class VideoRestoreFrameTests(unittest.TestCase):
         before = frame.reshape(-1, 3).mean(axis=0)
         after = restored.reshape(-1, 3).mean(axis=0)
         self.assertLess(float(np.ptp(after)), float(np.ptp(before)))
+
+    def test_background_enhancer_preserves_protected_pixels_exactly(self) -> None:
+        random = np.random.default_rng(7)
+        frame = random.integers(
+            0,
+            255,
+            size=(120, 160, 3),
+            dtype=np.uint8,
+        )
+        protected = np.zeros((120, 160), dtype=np.uint8)
+        protected[20:100, 45:120] = 255
+        enhancer = ConservativeBackgroundEnhancer(
+            RESTORATION_PROFILES["natural_hd"]
+        )
+
+        enhanced = enhancer.apply(frame, protected_mask=protected)
+
+        self.assertTrue(
+            np.array_equal(
+                enhanced[protected > 0],
+                frame[protected > 0],
+            )
+        )
+
+    def test_background_enhancer_does_not_amplify_noise(self) -> None:
+        random = np.random.default_rng(3)
+        frame = np.clip(
+            120.0 + random.normal(0.0, 10.0, size=(180, 320, 3)),
+            0,
+            255,
+        ).astype(np.uint8)
+        enhancer = ConservativeBackgroundEnhancer(
+            RESTORATION_PROFILES["natural_hd"]
+        )
+
+        enhanced = enhancer.apply(
+            frame,
+            protected_mask=np.zeros((180, 320), dtype=np.uint8),
+        )
+
+        self.assertLessEqual(
+            float(enhanced.astype(np.float32).std()),
+            float(frame.astype(np.float32).std()),
+        )
 
 
 @unittest.skipIf(cv2 is None or np is None, "OpenCV/NumPy no instalados")
@@ -142,11 +217,13 @@ class VideoRestoreIntegrationTests(unittest.TestCase):
             VIDEO_RESTORER.ffmpeg = ffmpeg
             VIDEO_RESTORER.ffprobe = ffprobe
             VIDEO_RESTORER._supports_nvenc.cache_clear()
+            progress: list[RestorationProgress] = []
             try:
                 result = VIDEO_RESTORER.process(
                     source,
                     output,
                     preset="natural",
+                    progress_callback=progress.append,
                 )
             finally:
                 VIDEO_RESTORER.ffmpeg = original_ffmpeg
@@ -160,6 +237,8 @@ class VideoRestoreIntegrationTests(unittest.TestCase):
             self.assertGreater(result.frames_with_text, 0)
             self.assertAlmostEqual(result.duration, 1.0, delta=0.20)
             self.assertTrue(result.audio_copied)
+            self.assertTrue(progress)
+            self.assertEqual(progress[-1].percent, 100)
 
     def test_hd_plus_outputs_vertical_1080_without_audio(self) -> None:
         ffmpeg = shutil.which("ffmpeg")

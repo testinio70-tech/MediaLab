@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
 
 from config import (
     FFMPEG_BINARY,
@@ -20,8 +20,12 @@ from config import (
     RESTORE_FOLDER,
     RESTORE_MAX_DURATION_SECONDS,
     RESTORE_MAX_TEXT_MASK_PERCENT,
+    RESTORE_PERSON_MODEL,
+    RESTORE_PERSON_PROTECTION_PERCENT,
     RESTORE_PROCESS_TIMEOUT_SECONDS,
     RESTORE_TARGET_SIZE_BYTES,
+    RESTORE_TEXT_CONFIDENCE,
+    RESTORE_TEXT_MODEL,
 )
 
 try:
@@ -103,187 +107,279 @@ class RestorationResult:
     error: str = ""
 
 
-class OverlayTextDetector:
-    """Detector conservador de trazos con forma de texto superpuesto."""
+@dataclass(slots=True, frozen=True)
+class RestorationProgress:
+    percent: int
+    stage: str
+    frames_processed: int = 0
+    total_frames: int = 0
 
-    def __init__(self, *, max_mask_fraction: float) -> None:
-        self.max_mask_fraction = min(0.25, max(0.01, max_mask_fraction))
-        self._previous_mask: Any | None = None
+
+class PersonProtectionSegmenter:
+    """Protege persona, cabello y extremidades antes de reconstruir píxeles."""
+
+    def __init__(
+        self,
+        *,
+        model_path: Path = RESTORE_PERSON_MODEL,
+        margin_fraction: float,
+    ) -> None:
+        if cv2 is None or np is None:
+            raise RuntimeError("OpenCV y NumPy no están disponibles.")
+        if not model_path.is_file():
+            raise RuntimeError(
+                f"No se encontró el modelo de protección humana: {model_path.name}"
+            )
+        self._network = cv2.dnn.readNet(str(model_path))
+        self._network.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        self._network.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        self.margin_fraction = min(0.05, max(0.005, margin_fraction))
+        self._previous_raw_mask: Any | None = None
         self._previous_histogram: Any | None = None
 
     def detect(self, frame: Any) -> Any:
-        if cv2 is None or np is None:
-            raise RuntimeError("OpenCV y NumPy no están disponibles.")
-
         height, width = frame.shape[:2]
-        scale = min(1.0, 720.0 / max(width, 1))
-        if scale < 1.0:
-            work = cv2.resize(
-                frame,
-                (max(2, int(width * scale)), max(2, int(height * scale))),
-                interpolation=cv2.INTER_AREA,
-            )
-        else:
-            work = frame
+        scene_changed = self._scene_changed(frame)
 
-        gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-        if self._scene_changed(gray):
-            self._previous_mask = None
+        resized = cv2.resize(frame, (192, 192), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
+        normalized = (rgb / 255.0 - 0.5) / 0.5
+        blob = cv2.dnn.blobFromImage(normalized)
+        self._network.setInput(blob)
+        output = self._network.forward()
+        if output.ndim != 4 or output.shape[1] < 2:
+            raise RuntimeError("El modelo humano devolvió una salida inválida.")
 
-        mask = self._detect_working_mask(gray)
-        if scale < 1.0:
-            mask = cv2.resize(
-                mask,
-                (width, height),
-                interpolation=cv2.INTER_NEAREST,
-            )
-
-        kernel_size = max(3, int(round(min(width, height) / 360)))
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (kernel_size, kernel_size),
+        raw_mask = (
+            np.argmax(output[0], axis=0).astype(np.uint8) * 255
         )
-        mask = cv2.dilate(mask, kernel, iterations=1)
-
-        if self._previous_mask is not None:
-            support_kernel = cv2.getStructuringElement(
-                cv2.MORPH_RECT,
-                (max(5, kernel_size * 3), max(3, kernel_size)),
-            )
-            support = cv2.dilate(mask, support_kernel, iterations=1)
-            carried = cv2.bitwise_and(self._previous_mask, support)
-            mask = cv2.bitwise_or(mask, carried)
-
-        masked_fraction = float(np.count_nonzero(mask)) / float(width * height)
-        if masked_fraction > self.max_mask_fraction:
-            logger.warning(
-                "Máscara de texto descartada por seguridad: %.2f%% del fotograma.",
-                masked_fraction * 100,
-            )
-            mask = np.zeros((height, width), dtype=np.uint8)
-
-        self._previous_mask = mask
-        return mask
-
-    def _detect_working_mask(self, gray: Any) -> Any:
-        height, width = gray.shape[:2]
-        blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=2.0)
-        high_pass = cv2.absdiff(gray, blur)
-
-        gradient_x = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
-        gradient_x = cv2.convertScaleAbs(gradient_x)
-        combined = cv2.max(high_pass, gradient_x)
-        _, strokes = cv2.threshold(
-            combined,
-            0,
-            255,
-            cv2.THRESH_BINARY | cv2.THRESH_OTSU,
+        raw_mask = cv2.resize(
+            raw_mask,
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
         )
-
-        close_width = max(9, width // 55)
-        close_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (close_width, 3),
-        )
-        grouped = cv2.morphologyEx(
-            strokes,
+        raw_mask = cv2.morphologyEx(
+            raw_mask,
             cv2.MORPH_CLOSE,
-            close_kernel,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
             iterations=1,
         )
-
         contours, _ = cv2.findContours(
-            grouped,
+            raw_mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE,
         )
-        output = np.zeros_like(gray)
-        frame_area = float(width * height)
-
+        minimum_component_area = float(width * height) * 0.003
         for contour in contours:
-            x, y, box_width, box_height = cv2.boundingRect(contour)
-            box_area = box_width * box_height
-            if box_area <= 0:
+            if cv2.contourArea(contour) < minimum_component_area:
                 continue
-            if box_height < max(7, int(height * 0.010)):
-                continue
-            if box_height > int(height * 0.13):
-                continue
-            if box_width < max(22, int(width * 0.035)):
-                continue
-            if box_width > int(width * 0.96):
-                continue
-            if box_area > frame_area * 0.12:
-                continue
-
-            aspect_ratio = box_width / max(box_height, 1)
-            if aspect_ratio < 1.25:
-                continue
-
-            roi_strokes = strokes[y : y + box_height, x : x + box_width]
-            density = float(np.count_nonzero(roi_strokes)) / float(box_area)
-            if density < 0.035 or density > 0.58:
-                continue
-
-            components, _, stats, _ = cv2.connectedComponentsWithStats(
-                roi_strokes,
-                connectivity=8,
-            )
-            useful_components = 0
-            for component in range(1, components):
-                component_area = int(stats[component, cv2.CC_STAT_AREA])
-                component_height = int(stats[component, cv2.CC_STAT_HEIGHT])
-                if component_area >= 2 and component_height >= 3:
-                    useful_components += 1
-            if useful_components < 3 or useful_components > 160:
-                continue
-
-            center_y = y + box_height / 2
-            edge_zone = center_y < height * 0.24 or center_y > height * 0.56
-            if not edge_zone and (
-                box_width < width * 0.15 or aspect_ratio < 2.2
-            ):
-                continue
-
-            roi_high_pass = high_pass[y : y + box_height, x : x + box_width]
-            local_threshold = max(
-                10.0,
-                float(np.percentile(roi_high_pass, 77)),
-            )
-            local_mask = np.where(
-                roi_high_pass >= local_threshold,
+            cv2.fillConvexPoly(
+                raw_mask,
+                cv2.convexHull(contour),
                 255,
-                0,
-            ).astype(np.uint8)
-            local_mask = cv2.bitwise_and(local_mask, roi_strokes)
-            local_mask = cv2.morphologyEx(
-                local_mask,
-                cv2.MORPH_CLOSE,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2)),
-                iterations=1,
-            )
-            output[y : y + box_height, x : x + box_width] = cv2.bitwise_or(
-                output[y : y + box_height, x : x + box_width],
-                local_mask,
             )
 
-        return output
+        protected = raw_mask
+        if (
+            not scene_changed
+            and self._previous_raw_mask is not None
+            and self._previous_raw_mask.shape == raw_mask.shape
+        ):
+            protected = cv2.bitwise_or(protected, self._previous_raw_mask)
+        self._previous_raw_mask = raw_mask
 
-    def _scene_changed(self, gray: Any) -> bool:
+        radius = max(
+            3,
+            int(round(min(width, height) * self.margin_fraction)),
+        )
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (radius * 2 + 1, radius * 2 + 1),
+        )
+        return cv2.dilate(protected, kernel, iterations=1)
+
+    def _scene_changed(self, frame: Any) -> bool:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        scale = min(1.0, 240.0 / max(gray.shape))
+        if scale < 1.0:
+            gray = cv2.resize(
+                gray,
+                None,
+                fx=scale,
+                fy=scale,
+                interpolation=cv2.INTER_AREA,
+            )
         histogram = cv2.calcHist([gray], [0], None, [32], [0, 256])
         cv2.normalize(histogram, histogram)
         changed = False
         if self._previous_histogram is not None:
-            distance = cv2.compareHist(
-                self._previous_histogram,
-                histogram,
-                cv2.HISTCMP_BHATTACHARYYA,
+            changed = (
+                cv2.compareHist(
+                    self._previous_histogram,
+                    histogram,
+                    cv2.HISTCMP_BHATTACHARYYA,
+                )
+                > 0.58
             )
-            changed = distance > 0.58
         self._previous_histogram = histogram
         return changed
+
+
+class OverlayTextDetector:
+    """Detector PP-OCR limitado a regiones confirmadas y fuera de personas."""
+
+    def __init__(
+        self,
+        *,
+        max_mask_fraction: float,
+        model_path: Path = RESTORE_TEXT_MODEL,
+        confidence_threshold: float = RESTORE_TEXT_CONFIDENCE,
+    ) -> None:
+        if cv2 is None or np is None:
+            raise RuntimeError("OpenCV y NumPy no están disponibles.")
+        if not model_path.is_file():
+            raise RuntimeError(
+                f"No se encontró el modelo de texto: {model_path.name}"
+            )
+        self.max_mask_fraction = min(0.25, max(0.01, max_mask_fraction))
+        self.confidence_threshold = min(
+            0.98,
+            max(0.30, confidence_threshold),
+        )
+        network = cv2.dnn.readNet(str(model_path))
+        network.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        network.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        self._model = cv2.dnn_TextDetectionModel_DB(network)
+        self._model.setInputParams(
+            scale=1.0 / 255.0,
+            size=(736, 736),
+            mean=(123.675, 116.28, 103.53),
+            swapRB=True,
+        )
+        self._model.setBinaryThreshold(0.30)
+        self._model.setPolygonThreshold(0.50)
+        self._model.setUnclipRatio(1.45)
+        self._model.setMaxCandidates(100)
+        self._previous_regions: Any | None = None
+
+    def detect(
+        self,
+        frame: Any,
+        *,
+        protected_mask: Any | None = None,
+    ) -> Any:
+        height, width = frame.shape[:2]
+        strong_regions = np.zeros((height, width), dtype=np.uint8)
+        weak_regions = np.zeros_like(strong_regions)
+        frame_area = float(width * height)
+
+        boxes, scores = self._model.detect(frame)
+        strong_threshold = min(
+            0.96,
+            max(0.82, self.confidence_threshold + 0.14),
+        )
+        for box, raw_score in zip(boxes, scores):
+            score = float(np.asarray(raw_score).reshape(-1)[0])
+            if score < self.confidence_threshold:
+                continue
+            polygon = np.asarray(box, dtype=np.int32).reshape(-1, 2)
+            polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+            polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+            area = abs(float(cv2.contourArea(polygon)))
+            if area < 12.0 or area > frame_area * self.max_mask_fraction:
+                continue
+            target = strong_regions if score >= strong_threshold else weak_regions
+            cv2.fillPoly(target, [polygon], 255)
+
+        accepted_regions = strong_regions
+        if self._previous_regions is not None and np.count_nonzero(weak_regions):
+            support_radius = max(3, int(round(min(width, height) * 0.006)))
+            support = cv2.dilate(
+                self._previous_regions,
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (support_radius * 2 + 1, support_radius * 2 + 1),
+                ),
+                iterations=1,
+            )
+            accepted_regions = cv2.bitwise_or(
+                accepted_regions,
+                cv2.bitwise_and(weak_regions, support),
+            )
+        current_regions = cv2.bitwise_or(strong_regions, weak_regions)
+        self._previous_regions = current_regions
+
+        mask = self._refine_glyph_mask(frame, accepted_regions)
+        if protected_mask is not None:
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(protected_mask))
+
+        masked_fraction = float(np.count_nonzero(mask)) / frame_area
+        safe_limit = self.max_mask_fraction
+        if protected_mask is not None:
+            protected_fraction = (
+                float(np.count_nonzero(protected_mask)) / frame_area
+            )
+            safe_limit = min(
+                0.20,
+                max(
+                    safe_limit,
+                    (1.0 - protected_fraction) * 0.20,
+                ),
+            )
+        if masked_fraction > safe_limit:
+            logger.warning(
+                (
+                    "Máscara DNN descartada por seguridad: %.2f%% "
+                    "(límite %.2f%%)."
+                ),
+                masked_fraction * 100,
+                safe_limit * 100,
+            )
+            return np.zeros((height, width), dtype=np.uint8)
+        return mask
+
+    def _refine_glyph_mask(self, frame: Any, regions: Any) -> Any:
+        if not np.count_nonzero(regions):
+            return regions
+
+        height, width = frame.shape[:2]
+        kernel_size = max(5, int(round(min(width, height) / 120)))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel_size = min(kernel_size, 15)
+        background = cv2.medianBlur(frame, kernel_size)
+        difference = cv2.absdiff(frame, background)
+        difference = np.max(difference, axis=2).astype(np.uint8)
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gradient_x = cv2.convertScaleAbs(
+            cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
+        )
+        gradient_y = cv2.convertScaleAbs(
+            cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
+        )
+        contrast = cv2.max(
+            difference,
+            cv2.addWeighted(gradient_x, 0.5, gradient_y, 0.5, 0),
+        )
+        candidate = np.where(contrast >= 9, 255, 0).astype(np.uint8)
+        candidate = cv2.bitwise_and(candidate, regions)
+        candidate = cv2.morphologyEx(
+            candidate,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        )
+        dilation = max(1, int(round(min(width, height) / 540)))
+        candidate = cv2.dilate(
+            candidate,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (dilation * 2 + 1, dilation * 2 + 1),
+            ),
+            iterations=1,
+        )
+        return cv2.bitwise_and(candidate, regions)
 
 
 class TemporalNaturalColor:
@@ -364,16 +460,13 @@ class TemporalNaturalColor:
     def _local_contrast(self, frame: Any) -> Any:
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         luminance, channel_a, channel_b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(8, 8))
-        enhanced_luminance = clahe.apply(luminance)
-        amount = self.profile.detail_strength
-        luminance = cv2.addWeighted(
-            luminance,
-            1.0 - amount,
-            enhanced_luminance,
-            amount,
-            0,
+        values = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        amount = self.profile.detail_strength * 0.16
+        curve = values + amount * (2.0 * values - 1.0) * (
+            4.0 * values * (1.0 - values)
         )
+        lookup = np.clip(curve * 255.0, 0, 255).astype(np.uint8)
+        luminance = cv2.LUT(luminance, lookup)
         return cv2.cvtColor(
             cv2.merge((luminance, channel_a, channel_b)),
             cv2.COLOR_LAB2BGR,
@@ -395,6 +488,69 @@ class TemporalNaturalColor:
         return changed
 
 
+class ConservativeBackgroundEnhancer:
+    """Reduce ruido y recupera microdetalle solo fuera de la silueta humana."""
+
+    def __init__(self, profile: RestorationProfile) -> None:
+        self.profile = profile
+
+    def apply(
+        self,
+        frame: Any,
+        *,
+        protected_mask: Any | None,
+    ) -> Any:
+        if self.profile.detail_strength <= 0:
+            return frame
+
+        denoised = cv2.bilateralFilter(
+            frame,
+            d=5,
+            sigmaColor=14.0,
+            sigmaSpace=4.0,
+        )
+        smooth = cv2.GaussianBlur(denoised, (0, 0), sigmaX=0.75)
+        detail_amount = 0.08 + self.profile.detail_strength * 0.20
+        detailed = cv2.addWeighted(
+            denoised,
+            1.0 + detail_amount,
+            smooth,
+            -detail_amount,
+            0,
+        )
+
+        blend_strength = min(
+            0.34,
+            0.18 + self.profile.detail_strength * 0.45,
+        )
+        if protected_mask is None:
+            return cv2.addWeighted(
+                frame,
+                1.0 - blend_strength,
+                detailed,
+                blend_strength,
+                0,
+            )
+
+        background_alpha = (
+            cv2.bitwise_not(protected_mask).astype(np.float32)
+            / 255.0
+            * blend_strength
+        )
+        background_alpha = cv2.GaussianBlur(
+            background_alpha,
+            (0, 0),
+            sigmaX=1.2,
+        )
+        background_alpha[protected_mask > 0] = 0.0
+        background_alpha = background_alpha[:, :, None]
+        output = (
+            frame.astype(np.float32) * (1.0 - background_alpha)
+            + detailed.astype(np.float32) * background_alpha
+        )
+        return np.clip(output, 0, 255).astype(np.uint8)
+
+
 class VideoRestorer:
     def __init__(self) -> None:
         self.ffmpeg = FFMPEG_BINARY
@@ -410,6 +566,12 @@ class VideoRestorer:
             missing.append("opencv-python-headless")
         if np is None:
             missing.append("numpy")
+        if cv2 is not None and not hasattr(cv2, "dnn_TextDetectionModel_DB"):
+            missing.append("OpenCV DNN TextDetectionModel_DB")
+        if not RESTORE_TEXT_MODEL.is_file():
+            missing.append(RESTORE_TEXT_MODEL.name)
+        if not RESTORE_PERSON_MODEL.is_file():
+            missing.append(RESTORE_PERSON_MODEL.name)
         return "disponible" if not missing else "faltan " + ", ".join(missing)
 
     def create_paths(
@@ -434,12 +596,16 @@ class VideoRestorer:
         output_path: Path,
         *,
         preset: str,
+        progress_callback: (
+            Callable[[RestorationProgress], None] | None
+        ) = None,
     ) -> RestorationResult:
         return await asyncio.to_thread(
             self.process,
             input_path,
             output_path,
             preset=preset,
+            progress_callback=progress_callback,
         )
 
     def process(
@@ -448,7 +614,15 @@ class VideoRestorer:
         output_path: Path,
         *,
         preset: str,
+        progress_callback: (
+            Callable[[RestorationProgress], None] | None
+        ) = None,
     ) -> RestorationResult:
+        _emit_progress(
+            progress_callback,
+            0,
+            "Preparando el análisis protegido",
+        )
         profile = RESTORATION_PROFILES.get(preset)
         if profile is None:
             return RestorationResult(
@@ -508,11 +682,7 @@ class VideoRestorer:
             upscale_to_1080=profile.upscale_to_1080,
         )
         bitrate = _calculate_video_bitrate(probe.duration)
-        encoders = (
-            ["h264_nvenc", "libx264"]
-            if self._supports_nvenc()
-            else ["libx264"]
-        )
+        encoders = ["libx264"]
         last_error = ""
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -529,6 +699,7 @@ class VideoRestorer:
                         target_height=target_height,
                         encoder=encoder,
                         video_bitrate=bitrate,
+                        progress_callback=progress_callback,
                     )
                 )
             except Exception as error:
@@ -552,6 +723,13 @@ class VideoRestorer:
                 continue
 
             try:
+                _emit_progress(
+                    progress_callback,
+                    98,
+                    "Verificando video y audio",
+                    frames_processed=frames_processed,
+                    total_frames=frames_processed,
+                )
                 output_probe = self._probe(output_path)
             except Exception as error:
                 last_error = str(error)
@@ -562,7 +740,7 @@ class VideoRestorer:
                 if encoder == "h264_nvenc"
                 else "OpenCV + FFmpeg · libx264"
             )
-            return RestorationResult(
+            result = RestorationResult(
                 True,
                 "Video restaurado correctamente.",
                 output_path=output_path,
@@ -576,6 +754,14 @@ class VideoRestorer:
                 frames_with_text=frames_with_text,
                 audio_copied=audio_copied,
             )
+            _emit_progress(
+                progress_callback,
+                100,
+                "Restauración terminada",
+                frames_processed=frames_processed,
+                total_frames=frames_processed,
+            )
+            return result
 
         output_path.unlink(missing_ok=True)
         return RestorationResult(
@@ -597,6 +783,9 @@ class VideoRestorer:
         target_height: int,
         encoder: str,
         video_bitrate: int,
+        progress_callback: (
+            Callable[[RestorationProgress], None] | None
+        ),
     ) -> tuple[int, int, bool]:
         capture = cv2.VideoCapture(str(input_path))
         if not capture.isOpened():
@@ -614,7 +803,11 @@ class VideoRestorer:
         text_detector = OverlayTextDetector(
             max_mask_fraction=RESTORE_MAX_TEXT_MASK_PERCENT / 100.0,
         )
+        person_protector = PersonProtectionSegmenter(
+            margin_fraction=RESTORE_PERSON_PROTECTION_PERCENT / 100.0,
+        )
         color_restorer = TemporalNaturalColor(profile)
+        quality_enhancer = ConservativeBackgroundEnhancer(profile)
         audio_copied = (
             probe.has_audio and probe.audio_codec in _MP4_COPY_AUDIO_CODECS
         )
@@ -639,6 +832,8 @@ class VideoRestorer:
 
         frames_processed = 0
         frames_with_text = 0
+        total_frames = max(1, int(round(probe.duration * probe.fps)))
+        last_reported_percent = -1
         started_at = monotonic()
 
         try:
@@ -653,17 +848,25 @@ class VideoRestorer:
                 if not ok:
                     break
 
-                mask = text_detector.detect(frame)
+                protected_mask = person_protector.detect(frame)
+                mask = text_detector.detect(
+                    frame,
+                    protected_mask=protected_mask,
+                )
                 if np.count_nonzero(mask):
                     frame = cv2.inpaint(
                         frame,
                         mask,
-                        inpaintRadius=3.0,
-                        flags=cv2.INPAINT_TELEA,
+                        inpaintRadius=2.0,
+                        flags=cv2.INPAINT_NS,
                     )
                     frames_with_text += 1
 
                 frame = color_restorer.apply(frame)
+                frame = quality_enhancer.apply(
+                    frame,
+                    protected_mask=protected_mask,
+                )
                 if frame.shape[1] != target_width or frame.shape[0] != target_height:
                     interpolation = (
                         cv2.INTER_LANCZOS4
@@ -684,7 +887,31 @@ class VideoRestorer:
                         "FFmpeg cerró el codificador antes de tiempo."
                     ) from error
                 frames_processed += 1
+                percent = min(
+                    94,
+                    4 + int((frames_processed / total_frames) * 90),
+                )
+                report_percent = percent - (percent % 5)
+                if report_percent > last_reported_percent:
+                    _emit_progress(
+                        progress_callback,
+                        report_percent,
+                        (
+                            "Protegiendo personas, detectando texto y "
+                            "recuperando detalle"
+                        ),
+                        frames_processed=frames_processed,
+                        total_frames=total_frames,
+                    )
+                    last_reported_percent = report_percent
 
+            _emit_progress(
+                progress_callback,
+                95,
+                "Codificando con calidad alta",
+                frames_processed=frames_processed,
+                total_frames=total_frames,
+            )
             process.stdin.close()
             stderr_bytes = process.stderr.read() if process.stderr else b""
             try:
@@ -754,18 +981,6 @@ class VideoRestorer:
             command.extend(["-map", "1:a:0?"])
         command.extend(["-sn", "-dn", "-map_metadata", "-1"])
 
-        if profile.detail_strength > 0:
-            sharpen = 0.18 + profile.detail_strength * 0.35
-            command.extend(
-                [
-                    "-vf",
-                    (
-                        "hqdn3d=0.8:0.8:2.4:2.4,"
-                        f"unsharp=5:5:{sharpen:.3f}:5:5:0"
-                    ),
-                ]
-            )
-
         if encoder == "h264_nvenc":
             command.extend(
                 [
@@ -791,7 +1006,9 @@ class VideoRestorer:
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "fast",
+                    "slow",
+                    "-profile:v",
+                    "high",
                     "-b:v",
                     str(video_bitrate),
                     "-maxrate",
@@ -936,6 +1153,32 @@ class VideoRestorer:
             )
             return False
         return True
+
+
+def _emit_progress(
+    callback: Callable[[RestorationProgress], None] | None,
+    percent: int,
+    stage: str,
+    *,
+    frames_processed: int = 0,
+    total_frames: int = 0,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(
+            RestorationProgress(
+                percent=min(100, max(0, int(percent))),
+                stage=stage,
+                frames_processed=max(0, int(frames_processed)),
+                total_frames=max(0, int(total_frames)),
+            )
+        )
+    except Exception:
+        logger.debug(
+            "El receptor de progreso de restauración falló.",
+            exc_info=True,
+        )
 
 
 def _target_dimensions(

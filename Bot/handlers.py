@@ -68,7 +68,11 @@ from services.tiktok_photos import (
 )
 from services.tiktok_urls import resolve_tiktok_url
 from services.video_fast1080 import FAST1080_ENHANCER
-from services.video_restore import RESTORATION_PROFILES, VIDEO_RESTORER
+from services.video_restore import (
+    RESTORATION_PROFILES,
+    VIDEO_RESTORER,
+    RestorationProgress,
+)
 from ui.menus import (
     download_menu,
     enhancement_menu,
@@ -1196,7 +1200,9 @@ async def _enqueue_restore(
         started_text=(
             f"🪄 Iniciando restauración · {profile.label}…\n\n"
             "📍 Estado: descargando el video desde Telegram\n"
-            "⚙️ Cola: mejoras de video"
+            "⚙️ Cola: mejoras de video\n\n"
+            "🧠 Después se analizará fotograma por fotograma. Es normal que "
+            "tarde notablemente más que una descarga."
         ),
         runner=runner,
     )
@@ -1215,7 +1221,9 @@ async def _announce_restore_queue_receipt(
                 status_message,
                 "🕒 Video añadido a la cola de restauración\n\n"
                 f"📍 Posición en espera: {receipt.position}\n"
-                "⚙️ Motor: OpenCV + FFmpeg\n\n"
+                "⚙️ Motor: PP-OCR + protección humana + OpenCV\n\n"
+                "⏳ La restauración de alta calidad puede tardar varios "
+                "minutos.\n"
                 "Te avisaré cuando comience.",
             )
         return
@@ -1305,17 +1313,67 @@ async def _process_restore_job(
         f"🪄 Restaurando video · {profile.label}…\n\n"
         f"📦 Entrada: {format_file_size(real_size)}\n"
         "🔤 Texto: análisis conservador de todos los fotogramas\n"
+        "🛡️ Identidad: rostro, cabello y cuerpo protegidos\n"
         "🎨 Color: balance temporal y saturación natural\n"
-        "✨ Detalle: mejora suave\n"
+        "✨ Detalle: limpieza y enfoque suave fuera de la persona\n"
         "🎞️ Salida: máximo 1080p\n\n"
-        "Este proceso puede tardar más que Super rápido 1080.",
+        "⏳ Este proceso es deliberadamente más lento que una descarga o "
+        "Super rápido 1080. Puede tardar varios minutos.",
     )
 
-    result = await VIDEO_RESTORER.process_async(
-        input_path,
-        output_path,
-        preset=preset,
+    progress_queue: asyncio.Queue[RestorationProgress] = asyncio.Queue()
+    event_loop = asyncio.get_running_loop()
+
+    def report_progress(progress: RestorationProgress) -> None:
+        event_loop.call_soon_threadsafe(
+            progress_queue.put_nowait,
+            progress,
+        )
+
+    processing_task = asyncio.create_task(
+        VIDEO_RESTORER.process_async(
+            input_path,
+            output_path,
+            preset=preset,
+            progress_callback=report_progress,
+        )
     )
+    last_reported_percent = -10
+    while not processing_task.done():
+        try:
+            progress = await asyncio.wait_for(
+                progress_queue.get(),
+                timeout=12.0,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+        while not progress_queue.empty():
+            progress = progress_queue.get_nowait()
+        if (
+            progress.percent < 95
+            and progress.percent - last_reported_percent < 10
+        ):
+            continue
+
+        frame_line = ""
+        if progress.total_frames > 0:
+            frame_line = (
+                f"\n🎞️ Avance: {progress.frames_processed:,} de "
+                f"{progress.total_frames:,} fotogramas"
+            )
+        await _safe_edit(
+            status_message,
+            f"🧠 Restauración de alta calidad · {profile.label}\n\n"
+            f"📊 Progreso: {progress.percent}%\n"
+            f"📍 Etapa: {progress.stage}"
+            f"{frame_line}\n\n"
+            "🛡️ La persona permanece protegida.\n"
+            "⏳ Es normal que este proceso tarde varios minutos.",
+        )
+        last_reported_percent = progress.percent
+
+    result = await processing_task
     if not result.success or result.output_path is None:
         if result.error:
             logger.error("Restauración integral falló: %s", result.error)

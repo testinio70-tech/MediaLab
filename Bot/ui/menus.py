@@ -86,9 +86,11 @@ def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
 def restoration_menu() -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "🪄 Restauración integral de video\n\n"
-        "MediaLab revisará todos los fotogramas para localizar texto "
-        "superpuesto, reconstruirá las zonas pequeñas y corregirá color, "
-        "temperatura y saturación.\n\n"
+        "MediaLab revisará cada fotograma con detección de texto y protección "
+        "de personas. Solo reconstruirá zonas seguras del fondo; rostro, "
+        "cabello y cuerpo no se regeneran.\n\n"
+        "También limpiará ruido, corregirá color y aplicará un enfoque "
+        "suave. Es un proceso de alta calidad y puede tardar varios minutos.\n\n"
         "Selecciona el acabado:"
     )
     keyboard = InlineKeyboardMarkup(
@@ -127,14 +129,17 @@ def restoration_prompt(
         f"🪄 Restauración integral · {preset_label}\n\n"
         "Envíame ahora un video normal o un archivo de video.\n\n"
         "El proceso realizará:\n"
-        "• revisión de todos los fotogramas;\n"
-        "• eliminación conservadora de texto superpuesto;\n"
+        "• revisión fotograma por fotograma;\n"
+        "• detección de texto mediante un modelo especializado;\n"
+        "• protección de rostro, cabello, manos y cuerpo;\n"
+        "• eliminación de texto solo en zonas seguras del fondo;\n"
         "• restauración de temperatura, saturación y contraste;\n"
-        "• mejora ligera de detalle sin superar 1080p.\n\n"
+        "• reducción de ruido y enfoque suave sin superar 1080p.\n\n"
         f"📦 Entrada máxima: {max_input_mb} MB\n"
         f"⏱️ Duración máxima inicial: {max_duration_seconds} s\n\n"
-        "La reconstrucción automática es conservadora: si una máscara ocupa "
-        "demasiada imagen, MediaLab la descarta para proteger el video."
+        "⏳ Tardará notablemente más que una descarga normal.\n"
+        "🛡️ Si un texto cruza una persona, MediaLab conservará esa parte "
+        "antes que arriesgar su identidad o anatomía."
     )
     keyboard = InlineKeyboardMarkup(
         [
@@ -235,9 +240,9 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
         ),
         "enhancements": (
             "✨ Mejoras\n\n"
-            "🪄 Restauración integral: elimina texto superpuesto de forma "
-            "conservadora, recupera colores naturales y mejora el acabado "
-            "hasta 1080p.\n\n"
+            "🪄 Restauración integral: revisa cada fotograma, protege a las "
+            "personas, elimina texto únicamente del fondo seguro y recupera "
+            "un acabado natural hasta 1080p. Es la opción más lenta.\n\n"
             "🖼️ Foto IA x2: restauración y ampliación con IA.\n\n"
             "⚡ Super rápido 1080: disponible; recibe videos y usa "
             "una cola separada de procesamiento.\n\n"
@@ -247,8 +252,9 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
             "🕒 Colas y tiempos\n\n"
             "Cada usuario puede tener una solicitud activa o pendiente.\n"
             "Una descarga que falla libera la cola para que continúe la siguiente.\n\n"
-            "Super rápido 1080 usa una cola separada. "
-            "Las futuras tareas de IA tendrán su propia cola con un solo trabajador."
+            "Super rápido 1080 y Restauración integral usan la cola de mejoras. "
+            "La restauración puede tardar varios minutos porque analiza todos "
+            "los fotogramas con un solo trabajador."
         ),
         "errors": (
             "⚠️ Errores frecuentes\n\n"
@@ -269,7 +275,7 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
             "📋 Comandos\n\n"
             "/start — Abrir MediaLab\n"
             "/menu — Abrir el menú principal\n"
-            "/restorevideo — Restaurar color y eliminar textos\n"
+            "/restorevideo — Restaurar cada fotograma y retirar texto seguro\n"
             "/status — Ver el estado de tus trabajos\n"
             "/cancel — Cancelar selecciones pendientes\n"
             "/help — Abrir esta ayuda\n"
