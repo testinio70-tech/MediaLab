@@ -78,6 +78,8 @@ LOGS_FOLDER = ROOT / "Logs"
 TEMP_FOLDER = BOT_FOLDER / "temp"
 CACHE_FOLDER = BOT_FOLDER / "cache"
 STATE_FOLDER = BOT_FOLDER / "state"
+FAST1080_FOLDER = TEMP_FOLDER / "Fast1080"
+RESTORE_FOLDER = TEMP_FOLDER / "RestoreHD"
 HEARTBEAT_FILE = STATE_FOLDER / "heartbeat.json"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
@@ -111,6 +113,49 @@ DOWNLOAD_QUEUE_WORKERS = _read_int_env(
 MAX_JOBS_PER_USER = _read_int_env(
     "MAX_JOBS_PER_USER", 1, minimum=1, maximum=10
 )
+
+FAST_QUEUE_MAX_SIZE = _read_int_env(
+    "FAST_QUEUE_MAX_SIZE", 5, minimum=1, maximum=20
+)
+FAST_QUEUE_WORKERS = _read_int_env(
+    "FAST_QUEUE_WORKERS", 1, minimum=1, maximum=2
+)
+FAST_MAX_JOBS_PER_USER = _read_int_env(
+    "FAST_MAX_JOBS_PER_USER", 1, minimum=1, maximum=3
+)
+FAST1080_MAX_INPUT_MB = _read_int_env(
+    "FAST1080_MAX_INPUT_MB", 20, minimum=1, maximum=20
+)
+FAST1080_MAX_INPUT_BYTES = FAST1080_MAX_INPUT_MB * 1024 * 1024
+FAST1080_MAX_DURATION_SECONDS = _read_int_env(
+    "FAST1080_MAX_DURATION_SECONDS", 60, minimum=1, maximum=600
+)
+FAST1080_TARGET_SIZE_MB = _read_int_env(
+    "FAST1080_TARGET_SIZE_MB", 44, minimum=5, maximum=48
+)
+FAST1080_TARGET_SIZE_BYTES = FAST1080_TARGET_SIZE_MB * 1024 * 1024
+FAST1080_PROCESS_TIMEOUT_SECONDS = _read_int_env(
+    "FAST1080_PROCESS_TIMEOUT_SECONDS", 900, minimum=60, maximum=7200
+)
+
+RESTORE_MAX_INPUT_MB = _read_int_env(
+    "RESTORE_MAX_INPUT_MB", 20, minimum=1, maximum=20
+)
+RESTORE_MAX_INPUT_BYTES = RESTORE_MAX_INPUT_MB * 1024 * 1024
+RESTORE_MAX_DURATION_SECONDS = _read_int_env(
+    "RESTORE_MAX_DURATION_SECONDS", 60, minimum=1, maximum=600
+)
+RESTORE_TARGET_SIZE_MB = _read_int_env(
+    "RESTORE_TARGET_SIZE_MB", 44, minimum=5, maximum=48
+)
+RESTORE_TARGET_SIZE_BYTES = RESTORE_TARGET_SIZE_MB * 1024 * 1024
+RESTORE_PROCESS_TIMEOUT_SECONDS = _read_int_env(
+    "RESTORE_PROCESS_TIMEOUT_SECONDS", 1800, minimum=60, maximum=14400
+)
+RESTORE_MAX_TEXT_MASK_PERCENT = _read_float_env(
+    "RESTORE_MAX_TEXT_MASK_PERCENT", 10.0, minimum=1.0, maximum=25.0
+)
+
 STATUS_MESSAGE_DELETE_DELAY = _read_float_env(
     "STATUS_MESSAGE_DELETE_DELAY", 2.0, minimum=0.0, maximum=60.0
 )
@@ -138,7 +183,8 @@ SUPERVISOR_RESTART_WINDOW_SECONDS = _read_int_env(
     "SUPERVISOR_RESTART_WINDOW_SECONDS", 600, minimum=60, maximum=86400
 )
 
+FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg"
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.4.0-alpha.1"
+APP_VERSION = "2.4.0-alpha.3"

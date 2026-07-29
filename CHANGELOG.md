@@ -1,5 +1,30 @@
 # Historial de cambios
 
+## 2.4.0-alpha.3
+
+- Nuevo comando `/restorevideo` y acceso desde el menú de mejoras.
+- Tres acabados: Natural, Natural HD y Natural HD+.
+- Revisión de todos los fotogramas para detectar trazos de texto sobrepuesto.
+- Reconstrucción conservadora mediante máscaras e inpainting de OpenCV.
+- Protección que descarta máscaras superiores al porcentaje configurado.
+- Balance de blancos y saturación suavizados entre fotogramas.
+- Contraste local, reducción ligera de ruido y enfoque moderado.
+- Ampliación opcional de 720p a 1080p, sin 2K ni 4K.
+- Copia del audio original cuando su códec es compatible con MP4.
+- Codificación mediante NVENC únicamente después de una prueba real de capacidad,
+  con respaldo automático en libx264.
+- Pruebas unitarias de color, texto y dimensiones, más una prueba integral con
+  video y audio sintéticos.
+
+## 2.4.0-alpha.2
+
+- Menú interactivo de mejoras y nueva opción Super rápido 1080.
+- Cola independiente para tareas de mejora.
+- Escalado Lanczos con FFmpeg hasta 1080p.
+- Aceleración NVENC con respaldo libx264.
+- Recepción de videos normales y documentos de video desde Telegram.
+- Heartbeat y supervisor de proceso para mejorar la disponibilidad.
+
 ## 2.3.0
 
 - Cola global de descargas para varios usuarios con uno o más trabajadores configurables.

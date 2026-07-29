@@ -25,11 +25,17 @@ from config import (
     ALLOWED_USERS,
     APP_VERSION,
     ENGINE_SELECTION_TTL,
+    FAST1080_MAX_DURATION_SECONDS,
+    FAST1080_MAX_INPUT_BYTES,
+    FAST1080_MAX_INPUT_MB,
     INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS,
     MAX_PENDING_SELECTIONS_PER_USER,
     MAX_TELEGRAM_FILE_SIZE,
     MAX_TELEGRAM_PHOTO_SIZE,
     PRIVILEGED_USERS,
+    RESTORE_MAX_DURATION_SECONDS,
+    RESTORE_MAX_INPUT_BYTES,
+    RESTORE_MAX_INPUT_MB,
     SEND_TIMEOUT,
     STATUS_MESSAGE_DELETE_DELAY,
 )
@@ -39,6 +45,11 @@ from engines.tiktok.ytdlp import TikTokYTDLPEngine
 from media_info import enrich_download_result, format_result_details
 from models import DownloadResult
 from services.download_queue import DOWNLOAD_QUEUE, DownloadJob, QueueReceipt
+from services.enhancement_queue import (
+    ENHANCEMENT_QUEUE,
+    EnhancementJob,
+    QueueReceipt as EnhancementQueueReceipt,
+)
 from services.file_cleanup import delete_sent_file, delete_sent_files
 from services.heartbeat import HEARTBEAT_SERVICE
 from services.instagram import (
@@ -56,14 +67,19 @@ from services.tiktok_photos import (
     is_tiktok_photo_url,
 )
 from services.tiktok_urls import resolve_tiktok_url
+from services.video_fast1080 import FAST1080_ENHANCER
+from services.video_restore import RESTORATION_PROFILES, VIDEO_RESTORER
 from ui.menus import (
     download_menu,
     enhancement_menu,
+    fast1080_prompt,
     feature_menu,
     health_keyboard,
     help_menu,
     help_section,
     main_menu,
+    restoration_menu,
+    restoration_prompt,
     status_keyboard,
 )
 from utils import detect_platform, extract_first_url, format_file_size
@@ -145,6 +161,24 @@ async def menu_command(
     await message.reply_text(text, reply_markup=keyboard)
 
 
+async def restorevideo_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    context.user_data.pop("menu_mode", None)
+    context.user_data.pop("restore_preset", None)
+    text, keyboard = restoration_menu()
+    await message.reply_text(text, reply_markup=keyboard)
+
+
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -196,6 +230,7 @@ async def cancel_command(
     pending_count = len(pending)
     pending.clear()
     context.user_data.pop("menu_mode", None)
+    context.user_data.pop("restore_preset", None)
 
     if pending_count:
         await message.reply_text(
@@ -249,6 +284,12 @@ async def handle_navigation(
 
     data = str(query.data or "")
 
+    if data != "menu:feature:fast1080" and not data.startswith(
+        "restore:preset:"
+    ):
+        context.user_data.pop("menu_mode", None)
+        context.user_data.pop("restore_preset", None)
+
     if data == "menu:main":
         text, keyboard = main_menu(
             APP_VERSION,
@@ -258,6 +299,8 @@ async def handle_navigation(
         text, keyboard = download_menu()
     elif data == "menu:enhance":
         text, keyboard = enhancement_menu()
+    elif data == "menu:restore":
+        text, keyboard = restoration_menu()
     elif data == "menu:status":
         text = await _build_status_text(user.id)
         keyboard = status_keyboard()
@@ -273,6 +316,29 @@ async def handle_navigation(
             return
         text = await _build_health_text()
         keyboard = health_keyboard()
+    elif data == "menu:feature:fast1080":
+        context.user_data["menu_mode"] = "fast1080"
+        text, keyboard = fast1080_prompt(
+            FAST1080_MAX_INPUT_MB,
+            FAST1080_MAX_DURATION_SECONDS,
+        )
+    elif data.startswith("restore:preset:"):
+        preset = data.rsplit(":", 1)[-1]
+        profile = RESTORATION_PROFILES.get(preset)
+        if profile is None:
+            await _safe_answer_query(
+                query,
+                text="Modo de restauración desconocido.",
+                show_alert=True,
+            )
+            return
+        context.user_data["menu_mode"] = "restorevideo"
+        context.user_data["restore_preset"] = preset
+        text, keyboard = restoration_prompt(
+            profile.label,
+            RESTORE_MAX_INPUT_MB,
+            RESTORE_MAX_DURATION_SECONDS,
+        )
     elif data.startswith("menu:feature:"):
         text, keyboard = feature_menu(data.rsplit(":", 1)[-1])
     elif data.startswith("help:"):
@@ -291,35 +357,59 @@ async def handle_navigation(
 
 async def _build_status_text(user_id: int) -> str:
     active, waiting = await DOWNLOAD_QUEUE.snapshot()
-    user_status = await DOWNLOAD_QUEUE.user_snapshot(user_id)
+    fast_active, fast_waiting = await ENHANCEMENT_QUEUE.snapshot()
+    download_status = await DOWNLOAD_QUEUE.user_snapshot(user_id)
+    fast_status = await ENHANCEMENT_QUEUE.user_snapshot(user_id)
 
-    if user_status.active:
-        personal = (
-            "🟢 Tu solicitud se está procesando ahora.\n"
-            f"🌐 Plataforma: {user_status.platform}\n"
-            f"⚙️ Motor: {user_status.label}"
+    personal_lines: list[str] = []
+
+    if download_status.active:
+        personal_lines.append(
+            "🟢 Descarga activa\n"
+            f"🌐 Plataforma: {download_status.platform}\n"
+            f"⚙️ Motor: {download_status.label}"
         )
-    elif user_status.waiting:
-        personal = (
-            "🕒 Tu solicitud está esperando.\n"
-            f"📍 Posición: {user_status.position}\n"
-            f"🌐 Plataforma: {user_status.platform}\n"
-            f"⚙️ Motor: {user_status.label}"
+    elif download_status.waiting:
+        personal_lines.append(
+            "🕒 Descarga esperando\n"
+            f"📍 Posición: {download_status.position}\n"
+            f"🌐 Plataforma: {download_status.platform}\n"
+            f"⚙️ Motor: {download_status.label}"
         )
-    else:
-        personal = "⚪ No tienes solicitudes activas ni pendientes."
+
+    if fast_status.active:
+        personal_lines.append(
+            "✨ Mejora activa\n"
+            f"⚙️ Motor: {fast_status.label}"
+        )
+    elif fast_status.waiting:
+        personal_lines.append(
+            "🕒 Mejora esperando\n"
+            f"📍 Posición: {fast_status.position}\n"
+            f"⚙️ Motor: {fast_status.label}"
+        )
+
+    personal = (
+        "\n\n".join(personal_lines)
+        if personal_lines
+        else "⚪ No tienes solicitudes activas ni pendientes."
+    )
 
     return (
         "📊 Estado de MediaLab\n\n"
         "Cola de descargas:\n"
         f"• Activas: {active}\n"
         f"• Esperando: {waiting}\n\n"
+        "Cola de mejoras:\n"
+        f"• Activas: {fast_active}\n"
+        f"• Esperando: {fast_waiting}\n\n"
         f"{personal}"
     )
 
 
 async def _build_health_text() -> str:
     active, waiting = await DOWNLOAD_QUEUE.snapshot()
+    fast_active, fast_waiting = await ENHANCEMENT_QUEUE.snapshot()
     heartbeat = "activo" if HEARTBEAT_SERVICE.running else "detenido"
 
     return (
@@ -328,7 +418,11 @@ async def _build_health_text() -> str:
         f"Tiempo activo: {_format_duration(HEARTBEAT_SERVICE.uptime_seconds)}\n"
         f"Heartbeat: {heartbeat}\n"
         f"Descargas activas: {active}\n"
-        f"Descargas esperando: {waiting}\n\n"
+        f"Descargas esperando: {waiting}\n"
+        f"Mejoras activas: {fast_active}\n"
+        f"Mejoras esperando: {fast_waiting}\n"
+        f"FFmpeg Fast1080: {FAST1080_ENHANCER.availability_text()}\n\n"
+        f"Restauración integral: {VIDEO_RESTORER.availability_text()}\n\n"
         "El supervisor externo revisará el heartbeat cada 5 minutos."
     )
 
@@ -658,6 +752,642 @@ async def _send_files_as_visual_media(
 # ==========================================================
 # Recepción y cola
 # ==========================================================
+
+
+
+async def handle_media(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    media_mode = context.user_data.get("menu_mode")
+    if media_mode == "restorevideo":
+        accepted = await _handle_restore_media(
+            context=context,
+            message=message,
+            user_id=user.id,
+        )
+        if accepted:
+            context.user_data.pop("menu_mode", None)
+            context.user_data.pop("restore_preset", None)
+        return
+
+    if media_mode != "fast1080":
+        await message.reply_text(
+            "ℹ️ Recibí un video, pero no hay una mejora seleccionada.\n\n"
+            "Abre /menu → ✨ Mejorar contenido → ⚡ Super rápido 1080."
+        )
+        return
+
+    media = _extract_received_video(message)
+    if media is None:
+        await message.reply_text(
+            "❌ El archivo recibido no parece ser un video compatible."
+        )
+        return
+
+    file_size = int(getattr(media, "file_size", 0) or 0)
+    if file_size > FAST1080_MAX_INPUT_BYTES:
+        await message.reply_text(
+            "⚠️ Ese video supera el límite de descarga del Bot API estándar.\n\n"
+            f"📦 Máximo permitido: {FAST1080_MAX_INPUT_MB} MB\n"
+            f"📄 Archivo recibido: {format_file_size(file_size)}"
+        )
+        return
+
+    known_duration = _telegram_duration_seconds(
+        getattr(media, "duration", 0)
+    )
+    if (
+        known_duration > 0
+        and known_duration > FAST1080_MAX_DURATION_SECONDS
+    ):
+        await message.reply_text(
+            "⚠️ El video supera la duración permitida para esta primera versión.\n\n"
+            f"⏱️ Máximo: {FAST1080_MAX_DURATION_SECONDS} segundos\n"
+            f"🎞️ Video recibido: {known_duration:.1f} segundos"
+        )
+        return
+
+    file_id = str(getattr(media, "file_id", "") or "")
+    file_unique_id = str(getattr(media, "file_unique_id", "") or "")
+    if not file_id or not file_unique_id:
+        await message.reply_text(
+            "❌ Telegram no entregó un identificador válido para ese video."
+        )
+        return
+
+    file_name = str(getattr(media, "file_name", "") or "video.mp4")
+    status_message = await message.reply_text(
+        "⏳ Registrando video en la cola ⚡ Super rápido 1080…"
+    )
+
+    receipt = await _enqueue_fast1080(
+        user_id=user.id,
+        source_message=message,
+        status_message=status_message,
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        file_name=file_name,
+        announced_size=file_size,
+    )
+    if receipt.accepted:
+        context.user_data.pop("menu_mode", None)
+
+
+def _extract_received_video(message: Message) -> Any | None:
+    if message.video is not None:
+        return message.video
+
+    document = message.document
+    if document is None:
+        return None
+
+    mime_type = str(document.mime_type or "").lower()
+    suffix = Path(document.file_name or "").suffix.lower()
+    if mime_type.startswith("video/") or suffix in _VIDEO_EXTENSIONS:
+        return document
+
+    return None
+
+
+def _telegram_duration_seconds(value: Any) -> float:
+    if hasattr(value, "total_seconds"):
+        try:
+            return max(0.0, float(value.total_seconds()))
+        except (TypeError, ValueError):
+            return 0.0
+
+    try:
+        return max(0.0, float(value or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _enqueue_fast1080(
+    *,
+    user_id: int,
+    source_message: Message,
+    status_message: Message,
+    file_id: str,
+    file_unique_id: str,
+    file_name: str,
+    announced_size: int,
+) -> EnhancementQueueReceipt:
+    async def runner() -> None:
+        await _process_fast1080_job(
+            user_id=user_id,
+            source_message=source_message,
+            status_message=status_message,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            file_name=file_name,
+            announced_size=announced_size,
+        )
+
+    job = EnhancementJob(
+        key=f"fast1080:{user_id}:{file_unique_id}",
+        user_id=user_id,
+        source=file_unique_id,
+        label="FFmpeg Fast 1080",
+        status_message=status_message,
+        started_text=(
+            "⚡ Iniciando Super rápido 1080…\n\n"
+            "📍 Estado: descargando el video desde Telegram\n"
+            "⚙️ Cola: procesamiento rápido"
+        ),
+        runner=runner,
+    )
+    receipt = await ENHANCEMENT_QUEUE.enqueue(job)
+    await _announce_fast_queue_receipt(status_message, receipt)
+    return receipt
+
+
+async def _announce_fast_queue_receipt(
+    status_message: Message,
+    receipt: EnhancementQueueReceipt,
+) -> None:
+    if receipt.accepted:
+        if receipt.position > 0:
+            await _safe_edit(
+                status_message,
+                "🕒 Video añadido a la cola ⚡ Super rápido 1080\n\n"
+                f"📍 Posición en espera: {receipt.position}\n"
+                "⚙️ Motor: FFmpeg\n\n"
+                "Te avisaré cuando comience.",
+            )
+        return
+
+    messages = {
+        "duplicate": (
+            "ℹ️ Ese mismo video ya está en la cola rápida."
+        ),
+        "user_limit": (
+            "🕒 Ya tienes una mejora rápida activa o en espera.\n\n"
+            "Cuando termine podrás enviar otro video."
+        ),
+        "full": (
+            "⚠️ La cola rápida está llena en este momento.\n\n"
+            "Intenta nuevamente cuando termine alguna solicitud."
+        ),
+        "unavailable": (
+            "❌ La cola rápida todavía no está disponible.\n\n"
+            "Reinicia MediaLab y vuelve a intentarlo."
+        ),
+    }
+    await _safe_edit(
+        status_message,
+        messages.get(
+            receipt.reason,
+            "❌ No se pudo registrar la mejora rápida.",
+        ),
+    )
+
+
+async def _process_fast1080_job(
+    *,
+    user_id: int,
+    source_message: Message,
+    status_message: Message,
+    file_id: str,
+    file_unique_id: str,
+    file_name: str,
+    announced_size: int,
+) -> None:
+    input_path, output_path = FAST1080_ENHANCER.create_paths(
+        user_id=user_id,
+        file_unique_id=file_unique_id,
+        original_name=file_name,
+    )
+
+    try:
+        telegram_file = await source_message.get_bot().get_file(
+            file_id,
+            read_timeout=SEND_TIMEOUT,
+            write_timeout=SEND_TIMEOUT,
+            connect_timeout=60,
+            pool_timeout=60,
+        )
+        await telegram_file.download_to_drive(
+            custom_path=input_path,
+            read_timeout=SEND_TIMEOUT,
+            write_timeout=SEND_TIMEOUT,
+            connect_timeout=60,
+            pool_timeout=60,
+        )
+    except Exception:
+        logger.exception("No se pudo descargar el video recibido desde Telegram.")
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "❌ Telegram no permitió descargar ese video.\n\n"
+            f"El límite de entrada de esta versión es {FAST1080_MAX_INPUT_MB} MB.",
+        )
+        return
+
+    real_size = input_path.stat().st_size if input_path.is_file() else 0
+    if real_size <= 0 or real_size > FAST1080_MAX_INPUT_BYTES:
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "⚠️ El archivo descargado no es válido o supera el límite.\n\n"
+            f"📦 Máximo: {FAST1080_MAX_INPUT_MB} MB\n"
+            f"📄 Recibido: {format_file_size(real_size or announced_size)}",
+        )
+        return
+
+    await _safe_edit(
+        status_message,
+        "⚡ Procesando video con FFmpeg…\n\n"
+        f"📦 Entrada: {format_file_size(real_size)}\n"
+        "🎞️ Objetivo: máximo 1080p\n"
+        "🔧 Filtro: Lanczos\n\n"
+        "La cola de descargas continúa funcionando por separado.",
+    )
+
+    result = await FAST1080_ENHANCER.process_async(input_path, output_path)
+    if not result.success or result.output_path is None:
+        if result.error:
+            logger.error("Fast1080 falló: %s", result.error)
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            f"❌ {result.message}\n\n"
+            "Revisa la consola de MediaLab para más información.",
+        )
+        return
+
+    download_result = DownloadResult(
+        success=True,
+        message="Video mejorado correctamente.",
+        file_path=result.output_path,
+        title="Super rápido 1080",
+        platform="Telegram",
+        engine=result.encoder,
+        file_size=result.file_size,
+        width=result.width,
+        height=result.height,
+        duration=result.duration,
+        extension=".mp4",
+        video_id=file_unique_id,
+    )
+
+    await _safe_edit(
+        status_message,
+        "📤 Enviando video mejorado a Telegram…\n\n"
+        f"📐 Resolución: {result.width}×{result.height}\n"
+        f"📦 Tamaño: {format_file_size(result.file_size)}\n"
+        f"⚙️ Codificador: {result.encoder}",
+    )
+
+    try:
+        sent = await send_video(
+            source_message,
+            download_result,
+            reply_to_message=False,
+        )
+    except Exception:
+        logger.exception("Telegram no pudo enviar el video Fast1080.")
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "❌ El video fue procesado, pero Telegram no pudo enviarlo.\n\n"
+            "Los archivos temporales fueron eliminados para proteger el disco.",
+        )
+        return
+
+    if not sent:
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "⚠️ La salida superó el límite configurado para Telegram.\n\n"
+            "MediaLab intentó controlar el tamaño, pero este video necesita "
+            "una compresión más fuerte.",
+        )
+        return
+
+    delete_sent_files([input_path, output_path])
+    await _complete_and_remove_status(
+        status_message,
+        "✅ Video mejorado y enviado correctamente.",
+    )
+
+
+async def _handle_restore_media(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    message: Message,
+    user_id: int,
+) -> bool:
+    preset = str(context.user_data.get("restore_preset") or "")
+    profile = RESTORATION_PROFILES.get(preset)
+    if profile is None:
+        await message.reply_text(
+            "❌ No encuentro el acabado elegido.\n\n"
+            "Abre /restorevideo y selecciona Natural, Natural HD o Natural HD+."
+        )
+        return False
+
+    availability = VIDEO_RESTORER.availability_text()
+    if availability != "disponible":
+        logger.error("Restauración integral no disponible: %s", availability)
+        await message.reply_text(
+            "❌ La restauración integral todavía no está disponible en esta "
+            "instalación.\n\nRevisa la consola de MediaLab para conocer los "
+            "componentes pendientes."
+        )
+        return False
+
+    media = _extract_received_video(message)
+    if media is None:
+        await message.reply_text(
+            "❌ El archivo recibido no parece ser un video compatible."
+        )
+        return False
+
+    file_size = int(getattr(media, "file_size", 0) or 0)
+    if file_size > RESTORE_MAX_INPUT_BYTES:
+        await message.reply_text(
+            "⚠️ Ese video supera el límite de descarga del Bot API estándar.\n\n"
+            f"📦 Máximo permitido: {RESTORE_MAX_INPUT_MB} MB\n"
+            f"📄 Archivo recibido: {format_file_size(file_size)}"
+        )
+        return False
+
+    known_duration = _telegram_duration_seconds(
+        getattr(media, "duration", 0)
+    )
+    if (
+        known_duration > 0
+        and known_duration > RESTORE_MAX_DURATION_SECONDS
+    ):
+        await message.reply_text(
+            "⚠️ El video supera la duración permitida para esta versión "
+            "de prueba.\n\n"
+            f"⏱️ Máximo: {RESTORE_MAX_DURATION_SECONDS} segundos\n"
+            f"🎞️ Video recibido: {known_duration:.1f} segundos"
+        )
+        return False
+
+    file_id = str(getattr(media, "file_id", "") or "")
+    file_unique_id = str(getattr(media, "file_unique_id", "") or "")
+    if not file_id or not file_unique_id:
+        await message.reply_text(
+            "❌ Telegram no entregó un identificador válido para ese video."
+        )
+        return False
+
+    file_name = str(getattr(media, "file_name", "") or "video.mp4")
+    status_message = await message.reply_text(
+        "⏳ Registrando video en la cola de restauración integral…"
+    )
+    receipt = await _enqueue_restore(
+        user_id=user_id,
+        source_message=message,
+        status_message=status_message,
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        file_name=file_name,
+        announced_size=file_size,
+        preset=preset,
+    )
+    return receipt.accepted
+
+
+async def _enqueue_restore(
+    *,
+    user_id: int,
+    source_message: Message,
+    status_message: Message,
+    file_id: str,
+    file_unique_id: str,
+    file_name: str,
+    announced_size: int,
+    preset: str,
+) -> EnhancementQueueReceipt:
+    profile = RESTORATION_PROFILES[preset]
+
+    async def runner() -> None:
+        await _process_restore_job(
+            user_id=user_id,
+            source_message=source_message,
+            status_message=status_message,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            file_name=file_name,
+            announced_size=announced_size,
+            preset=preset,
+        )
+
+    job = EnhancementJob(
+        key=f"restore:{user_id}:{file_unique_id}:{preset}",
+        user_id=user_id,
+        source=file_unique_id,
+        label=f"Restauración · {profile.label}",
+        status_message=status_message,
+        started_text=(
+            f"🪄 Iniciando restauración · {profile.label}…\n\n"
+            "📍 Estado: descargando el video desde Telegram\n"
+            "⚙️ Cola: mejoras de video"
+        ),
+        runner=runner,
+    )
+    receipt = await ENHANCEMENT_QUEUE.enqueue(job)
+    await _announce_restore_queue_receipt(status_message, receipt)
+    return receipt
+
+
+async def _announce_restore_queue_receipt(
+    status_message: Message,
+    receipt: EnhancementQueueReceipt,
+) -> None:
+    if receipt.accepted:
+        if receipt.position > 0:
+            await _safe_edit(
+                status_message,
+                "🕒 Video añadido a la cola de restauración\n\n"
+                f"📍 Posición en espera: {receipt.position}\n"
+                "⚙️ Motor: OpenCV + FFmpeg\n\n"
+                "Te avisaré cuando comience.",
+            )
+        return
+
+    messages = {
+        "duplicate": "ℹ️ Ese mismo video ya está en la cola de restauración.",
+        "user_limit": (
+            "🕒 Ya tienes una mejora activa o en espera.\n\n"
+            "Cuando termine podrás enviar otro video."
+        ),
+        "full": (
+            "⚠️ La cola de mejoras está llena en este momento.\n\n"
+            "Intenta nuevamente cuando termine alguna solicitud."
+        ),
+        "unavailable": (
+            "❌ La cola de mejoras todavía no está disponible.\n\n"
+            "Reinicia MediaLab y vuelve a intentarlo."
+        ),
+    }
+    await _safe_edit(
+        status_message,
+        messages.get(
+            receipt.reason,
+            "❌ No se pudo registrar la restauración.",
+        ),
+    )
+
+
+async def _process_restore_job(
+    *,
+    user_id: int,
+    source_message: Message,
+    status_message: Message,
+    file_id: str,
+    file_unique_id: str,
+    file_name: str,
+    announced_size: int,
+    preset: str,
+) -> None:
+    profile = RESTORATION_PROFILES[preset]
+    input_path, output_path = VIDEO_RESTORER.create_paths(
+        user_id=user_id,
+        file_unique_id=file_unique_id,
+        original_name=file_name,
+    )
+
+    try:
+        telegram_file = await source_message.get_bot().get_file(
+            file_id,
+            read_timeout=SEND_TIMEOUT,
+            write_timeout=SEND_TIMEOUT,
+            connect_timeout=60,
+            pool_timeout=60,
+        )
+        await telegram_file.download_to_drive(
+            custom_path=input_path,
+            read_timeout=SEND_TIMEOUT,
+            write_timeout=SEND_TIMEOUT,
+            connect_timeout=60,
+            pool_timeout=60,
+        )
+    except Exception:
+        logger.exception(
+            "No se pudo descargar el video para restauración desde Telegram."
+        )
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "❌ Telegram no permitió descargar ese video.\n\n"
+            f"El límite de entrada de esta versión es {RESTORE_MAX_INPUT_MB} MB.",
+        )
+        return
+
+    real_size = input_path.stat().st_size if input_path.is_file() else 0
+    if real_size <= 0 or real_size > RESTORE_MAX_INPUT_BYTES:
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "⚠️ El archivo descargado no es válido o supera el límite.\n\n"
+            f"📦 Máximo: {RESTORE_MAX_INPUT_MB} MB\n"
+            f"📄 Recibido: {format_file_size(real_size or announced_size)}",
+        )
+        return
+
+    await _safe_edit(
+        status_message,
+        f"🪄 Restaurando video · {profile.label}…\n\n"
+        f"📦 Entrada: {format_file_size(real_size)}\n"
+        "🔤 Texto: análisis conservador de todos los fotogramas\n"
+        "🎨 Color: balance temporal y saturación natural\n"
+        "✨ Detalle: mejora suave\n"
+        "🎞️ Salida: máximo 1080p\n\n"
+        "Este proceso puede tardar más que Super rápido 1080.",
+    )
+
+    result = await VIDEO_RESTORER.process_async(
+        input_path,
+        output_path,
+        preset=preset,
+    )
+    if not result.success or result.output_path is None:
+        if result.error:
+            logger.error("Restauración integral falló: %s", result.error)
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            f"❌ {result.message}\n\n"
+            "Revisa la consola de MediaLab para más información.",
+        )
+        return
+
+    download_result = DownloadResult(
+        success=True,
+        message="Video restaurado correctamente.",
+        file_path=result.output_path,
+        title=f"Restauración integral · {result.preset}",
+        platform="Telegram",
+        engine=result.encoder,
+        file_size=result.file_size,
+        width=result.width,
+        height=result.height,
+        duration=result.duration,
+        extension=".mp4",
+        video_id=file_unique_id,
+    )
+
+    audio_text = (
+        "audio original conservado"
+        if result.audio_copied
+        else "audio convertido para compatibilidad"
+    )
+    await _safe_edit(
+        status_message,
+        "📤 Enviando video restaurado a Telegram…\n\n"
+        f"🎨 Acabado: {result.preset}\n"
+        f"📐 Resolución: {result.width}×{result.height}\n"
+        f"🎞️ Fotogramas revisados: {result.frames_processed}\n"
+        f"🔤 Fotogramas con reconstrucción: {result.frames_with_text}\n"
+        f"🔊 Audio: {audio_text}\n"
+        f"📦 Tamaño: {format_file_size(result.file_size)}",
+    )
+
+    try:
+        sent = await send_video(
+            source_message,
+            download_result,
+            reply_to_message=False,
+        )
+    except Exception:
+        logger.exception("Telegram no pudo enviar el video restaurado.")
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "❌ El video fue restaurado, pero Telegram no pudo enviarlo.\n\n"
+            "Los archivos temporales fueron eliminados para proteger el disco.",
+        )
+        return
+
+    if not sent:
+        delete_sent_files([input_path, output_path])
+        await _safe_edit(
+            status_message,
+            "⚠️ La salida superó el límite configurado para Telegram.\n\n"
+            "Prueba con un video más corto o con el acabado Natural.",
+        )
+        return
+
+    delete_sent_files([input_path, output_path])
+    await _complete_and_remove_status(
+        status_message,
+        "✅ Video restaurado y enviado correctamente.",
+    )
 
 
 async def handle_link(

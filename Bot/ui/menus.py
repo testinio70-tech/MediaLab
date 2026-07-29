@@ -47,11 +47,18 @@ def download_menu() -> tuple[str, InlineKeyboardMarkup]:
 def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "✨ Mejorar contenido\n\n"
-        "Estas herramientas se integrarán progresivamente durante MediaLab 2.4.x.\n\n"
-        "Selecciona una opción para conocer sus límites:"
+        "⚡ Super rápido 1080 ya está disponible con una cola separada.\n"
+        "Las herramientas de IA continuarán integrándose progresivamente.\n\n"
+        "Selecciona una opción:"
     )
     keyboard = InlineKeyboardMarkup(
         [
+            [
+                InlineKeyboardButton(
+                    "🪄 Restauración integral",
+                    callback_data="menu:restore",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     "🖼️ Foto IA x2",
@@ -76,6 +83,98 @@ def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
     return text, keyboard
 
 
+def restoration_menu() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🪄 Restauración integral de video\n\n"
+        "MediaLab revisará todos los fotogramas para localizar texto "
+        "superpuesto, reconstruirá las zonas pequeñas y corregirá color, "
+        "temperatura y saturación.\n\n"
+        "Selecciona el acabado:"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🌿 Natural",
+                    callback_data="restore:preset:natural",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✨ Natural HD · recomendado",
+                    callback_data="restore:preset:natural_hd",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔎 Natural HD+ · hasta 1080p",
+                    callback_data="restore:preset:natural_hd_plus",
+                )
+            ],
+            [InlineKeyboardButton("↩️ Mejoras", callback_data="menu:enhance")],
+            [InlineKeyboardButton("🏠 Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
+def restoration_prompt(
+    preset_label: str,
+    max_input_mb: int,
+    max_duration_seconds: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"🪄 Restauración integral · {preset_label}\n\n"
+        "Envíame ahora un video normal o un archivo de video.\n\n"
+        "El proceso realizará:\n"
+        "• revisión de todos los fotogramas;\n"
+        "• eliminación conservadora de texto superpuesto;\n"
+        "• restauración de temperatura, saturación y contraste;\n"
+        "• mejora ligera de detalle sin superar 1080p.\n\n"
+        f"📦 Entrada máxima: {max_input_mb} MB\n"
+        f"⏱️ Duración máxima inicial: {max_duration_seconds} s\n\n"
+        "La reconstrucción automática es conservadora: si una máscara ocupa "
+        "demasiada imagen, MediaLab la descarta para proteger el video."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "↩️ Elegir otro acabado",
+                    callback_data="menu:restore",
+                )
+            ],
+            [InlineKeyboardButton("🏠 Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
+def fast1080_prompt(
+    max_input_mb: int,
+    max_duration_seconds: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "⚡ Super rápido 1080\n\n"
+        "Envíame ahora un video como video normal o como archivo.\n\n"
+        "MediaLab lo escalará con FFmpeg y filtro Lanczos, mantendrá la "
+        "proporción y generará un MP4 H.264 compatible con Telegram.\n\n"
+        f"📦 Entrada máxima: {max_input_mb} MB\n"
+        f"⏱️ Duración máxima inicial: {max_duration_seconds} s\n"
+        "🎞️ Salida máxima: 1920×1080 o 1080×1920\n"
+        "⚙️ Aceleración: NVIDIA NVENC cuando esté disponible; si falla, "
+        "se usa libx264 automáticamente.\n\n"
+        "Envía un solo video."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("↩️ Mejoras", callback_data="menu:enhance")],
+            [InlineKeyboardButton("🏠 Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
 def feature_menu(feature: str) -> tuple[str, InlineKeyboardMarkup]:
     texts = {
         "photo": (
@@ -86,8 +185,8 @@ def feature_menu(feature: str) -> tuple[str, InlineKeyboardMarkup]:
         "fast1080": (
             "⚡ Super rápido 1080\n\n"
             "Escalado rápido con FFmpeg hasta 1080p. "
-            "No inventará detalles nuevos y será mucho más rápido que la IA.\n\n"
-            "Estado: en preparación para MediaLab 2.4.0-alpha.2."
+            "No inventa detalles nuevos y es mucho más rápido que la IA.\n\n"
+            "Estado: disponible."
         ),
         "videoai": (
             "🐢 IA x2 · máximo 15 s · lento\n\n"
@@ -136,15 +235,20 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
         ),
         "enhancements": (
             "✨ Mejoras\n\n"
+            "🪄 Restauración integral: elimina texto superpuesto de forma "
+            "conservadora, recupera colores naturales y mejora el acabado "
+            "hasta 1080p.\n\n"
             "🖼️ Foto IA x2: restauración y ampliación con IA.\n\n"
-            "⚡ Super rápido 1080: escalado rápido con FFmpeg.\n\n"
+            "⚡ Super rápido 1080: disponible; recibe videos y usa "
+            "una cola separada de procesamiento.\n\n"
             "🐢 IA x2: video lento, máximo 15 segundos y salida 1080p."
         ),
         "queues": (
             "🕒 Colas y tiempos\n\n"
             "Cada usuario puede tener una solicitud activa o pendiente.\n"
             "Una descarga que falla libera la cola para que continúe la siguiente.\n\n"
-            "Las futuras tareas de IA usarán una cola separada con un solo trabajador."
+            "Super rápido 1080 usa una cola separada. "
+            "Las futuras tareas de IA tendrán su propia cola con un solo trabajador."
         ),
         "errors": (
             "⚠️ Errores frecuentes\n\n"
@@ -165,6 +269,7 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
             "📋 Comandos\n\n"
             "/start — Abrir MediaLab\n"
             "/menu — Abrir el menú principal\n"
+            "/restorevideo — Restaurar color y eliminar textos\n"
             "/status — Ver el estado de tus trabajos\n"
             "/cancel — Cancelar selecciones pendientes\n"
             "/help — Abrir esta ayuda\n"

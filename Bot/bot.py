@@ -19,15 +19,18 @@ from config import APP_NAME, APP_VERSION, TOKEN
 from handlers import (
     cancel_command,
     handle_link,
+    handle_media,
     handle_navigation,
     handle_tiktok_engine_selection,
     health_command,
     help_command,
     menu_command,
+    restorevideo_command,
     start,
     status_command,
 )
 from services.download_queue import DOWNLOAD_QUEUE
+from services.enhancement_queue import ENHANCEMENT_QUEUE
 from services.file_cleanup import periodic_cleanup_loop
 from services.heartbeat import HEARTBEAT_SERVICE
 
@@ -70,6 +73,7 @@ async def error_handler(
 
 async def post_init(application: Application) -> None:
     await DOWNLOAD_QUEUE.start()
+    await ENHANCEMENT_QUEUE.start()
     await HEARTBEAT_SERVICE.start()
 
     cleanup_task = asyncio.create_task(
@@ -82,6 +86,7 @@ async def post_init(application: Application) -> None:
         [
             BotCommand("start", "Abrir MediaLab"),
             BotCommand("menu", "Abrir el menú principal"),
+            BotCommand("restorevideo", "Restaurar color y eliminar textos"),
             BotCommand("status", "Ver el estado de tus trabajos"),
             BotCommand("cancel", "Cancelar una selección pendiente"),
             BotCommand("help", "Abrir la ayuda interactiva"),
@@ -95,6 +100,7 @@ async def post_init(application: Application) -> None:
 
 async def post_stop(application: Application) -> None:
     await HEARTBEAT_SERVICE.stop()
+    await ENHANCEMENT_QUEUE.stop()
     await DOWNLOAD_QUEUE.stop()
 
     task = application.bot_data.pop(_CLEANUP_TASK_KEY, None)
@@ -117,6 +123,7 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("restorevideo", restorevideo_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
@@ -130,7 +137,13 @@ def build_application() -> Application:
     application.add_handler(
         CallbackQueryHandler(
             handle_navigation,
-            pattern=r"^(menu|help):",
+            pattern=r"^(menu|help|restore):",
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.VIDEO | filters.Document.VIDEO,
+            handle_media,
         )
     )
     application.add_handler(
