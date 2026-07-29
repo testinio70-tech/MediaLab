@@ -12,6 +12,8 @@ os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
 
 from services.video_restore import (  # noqa: E402
     ConservativeBackgroundEnhancer,
+    FaceIdentityProtector,
+    GenerativeTextInpainter,
     RESTORATION_PROFILES,
     OverlayTextDetector,
     PersonProtectionSegmenter,
@@ -23,6 +25,7 @@ from services.video_restore import (  # noqa: E402
     cv2,
     np,
 )
+from config import RESTORE_INPAINT_MODEL, RESTORE_SUPERRES_MODEL  # noqa: E402
 
 
 class VideoRestorePureTests(unittest.TestCase):
@@ -54,6 +57,15 @@ class VideoRestorePureTests(unittest.TestCase):
         self.assertEqual(
             _target_dimensions(3840, 2160, upscale_to_1080=False),
             (1920, 1080),
+        )
+
+    def test_alpha5_exposes_two_primary_modes(self) -> None:
+        self.assertEqual(
+            RESTORATION_PROFILES["faithful"].label,
+            "Restauración fiel",
+        )
+        self.assertTrue(
+            RESTORATION_PROFILES["ai_hd"].ai_super_resolution
         )
 
 
@@ -98,6 +110,29 @@ class VideoRestoreFrameTests(unittest.TestCase):
 
         self.assertEqual(int(np.count_nonzero(mask)), 0)
 
+    def test_text_detector_includes_nearby_social_icon(self) -> None:
+        frame = np.full((420, 640, 3), 48, dtype=np.uint8)
+        cv2.rectangle(frame, (90, 270), (140, 320), (245, 245, 245), 3)
+        cv2.circle(frame, (115, 295), 12, (245, 245, 245), 3)
+        cv2.putText(
+            frame,
+            "@CUENTA_DE_PRUEBA",
+            (90, 365),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+        )
+        detector = OverlayTextDetector(max_mask_fraction=0.12)
+
+        mask = detector.detect(frame)
+
+        self.assertGreater(
+            int(np.count_nonzero(mask[265:325, 85:145])),
+            100,
+        )
+
     def test_person_protection_model_returns_a_safe_mask(self) -> None:
         frame = np.full((240, 320, 3), 80, dtype=np.uint8)
         segmenter = PersonProtectionSegmenter(margin_fraction=0.015)
@@ -118,6 +153,21 @@ class VideoRestoreFrameTests(unittest.TestCase):
         before = frame.reshape(-1, 3).mean(axis=0)
         after = restored.reshape(-1, 3).mean(axis=0)
         self.assertLess(float(np.ptp(after)), float(np.ptp(before)))
+
+    def test_color_restoration_reduces_extreme_filter_saturation(self) -> None:
+        frame = np.full((240, 320, 3), (45, 210, 70), dtype=np.uint8)
+        restorer = TemporalNaturalColor(
+            RESTORATION_PROFILES["faithful"]
+        )
+
+        restored = restorer.apply(frame)
+
+        before = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[:, :, 1]
+        after = cv2.cvtColor(restored, cv2.COLOR_BGR2HSV)[:, :, 1]
+        self.assertLess(
+            float(np.percentile(after, 75)),
+            float(np.percentile(before, 75)) * 0.80,
+        )
 
     def test_background_enhancer_preserves_protected_pixels_exactly(self) -> None:
         random = np.random.default_rng(7)
@@ -163,6 +213,49 @@ class VideoRestoreFrameTests(unittest.TestCase):
             float(frame.astype(np.float32).std()),
         )
 
+    def test_face_protector_returns_frame_sized_mask(self) -> None:
+        protector = FaceIdentityProtector()
+        frame = np.full((180, 320, 3), 80, dtype=np.uint8)
+
+        mask = protector.detect(frame)
+
+        self.assertEqual(mask.shape, frame.shape[:2])
+        self.assertEqual(mask.dtype, np.uint8)
+
+    def test_face_text_uses_nongenerative_interpolation(self) -> None:
+        frame = np.full((120, 160, 3), 80, dtype=np.uint8)
+        frame[:, :, 1] = np.arange(160, dtype=np.uint8)
+        text_mask = np.zeros((120, 160), dtype=np.uint8)
+        text_mask[45:65, 68:92] = 255
+        frame[text_mask > 0] = 255
+        face_mask = np.zeros_like(text_mask)
+        face_mask[25:95, 45:115] = 255
+        protected_mask = face_mask.copy()
+        inpainter = GenerativeTextInpainter.__new__(
+            GenerativeTextInpainter
+        )
+        inpainter._session = object()
+
+        restored = inpainter.apply(
+            frame,
+            text_mask,
+            protected_mask=protected_mask,
+            face_mask=face_mask,
+        )
+
+        self.assertTrue(
+            np.array_equal(
+                restored[text_mask == 0],
+                frame[text_mask == 0],
+            )
+        )
+        self.assertFalse(
+            np.array_equal(
+                restored[text_mask > 0],
+                frame[text_mask > 0],
+            )
+        )
+
 
 @unittest.skipIf(cv2 is None or np is None, "OpenCV/NumPy no instalados")
 class VideoRestoreIntegrationTests(unittest.TestCase):
@@ -171,6 +264,8 @@ class VideoRestoreIntegrationTests(unittest.TestCase):
         ffprobe = shutil.which("ffprobe")
         if not ffmpeg or not ffprobe:
             self.skipTest("FFmpeg/ffprobe no disponibles")
+        if not RESTORE_INPAINT_MODEL.is_file():
+            self.skipTest("Modelo LaMa local no instalado")
 
         with tempfile.TemporaryDirectory(prefix="medialab-restore-test-") as folder:
             root = Path(folder)
@@ -222,7 +317,7 @@ class VideoRestoreIntegrationTests(unittest.TestCase):
                 result = VIDEO_RESTORER.process(
                     source,
                     output,
-                    preset="natural",
+                    preset="faithful",
                     progress_callback=progress.append,
                 )
             finally:
@@ -240,11 +335,16 @@ class VideoRestoreIntegrationTests(unittest.TestCase):
             self.assertTrue(progress)
             self.assertEqual(progress[-1].percent, 100)
 
-    def test_hd_plus_outputs_vertical_1080_without_audio(self) -> None:
+    def test_ai_hd_outputs_vertical_1080_without_audio(self) -> None:
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe")
         if not ffmpeg or not ffprobe:
             self.skipTest("FFmpeg/ffprobe no disponibles")
+        if (
+            not RESTORE_INPAINT_MODEL.is_file()
+            or not RESTORE_SUPERRES_MODEL.is_file()
+        ):
+            self.skipTest("Modelos IA locales no instalados")
 
         with tempfile.TemporaryDirectory(prefix="medialab-hdplus-test-") as folder:
             root = Path(folder)
@@ -286,7 +386,7 @@ class VideoRestoreIntegrationTests(unittest.TestCase):
                 result = VIDEO_RESTORER.process(
                     source,
                     output,
-                    preset="natural_hd_plus",
+                    preset="ai_hd",
                 )
             finally:
                 VIDEO_RESTORER.ffmpeg = original_ffmpeg

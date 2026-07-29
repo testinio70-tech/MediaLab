@@ -1,5 +1,27 @@
 # Historial de cambios
 
+## 2.4.0-alpha.5
+
+- Herramienta reducida a dos modos claros: Restauración fiel y Restauración IA
+  HD.
+- Detección adaptativa de filtros de aplicación, tinte dominante, saturación
+  excesiva e iluminación plana.
+- Corrección cromática temporal con fuerza separada para fondo y persona.
+- Detección de logotipos pequeños asociados a texto y eliminación completa de
+  la sobreimpresión.
+- LaMa local para reconstruir trazos que cruzan piel o ropa; OpenCV conserva la
+  ruta rápida cuando el texto está solamente sobre el fondo.
+- Real-ESRGAN 2× local mediante DirectML para el modo IA HD.
+- Mezcla conservadora del resultado neuronal con el fotograma real: mayor
+  fuerza en fondo, menor en cuerpo y mínima en rostro.
+- Protección facial adicional con YuNet para bloquear cambios de identidad,
+  forma y proporciones.
+- Cola de un trabajo y mensajes de Telegram con estimación explícita de proceso
+  prolongado.
+- Instalador verificable para los modelos grandes guardados fuera de Git.
+- Eliminación durante desarrollo de motores x4 y conversiones x2 incompatibles
+  que producían mosaicos, suavizado excesivo o errores de carga.
+
 ## 2.4.0-alpha.4
 
 - Sustitución del detector heurístico de bordes por PP-OCRv3 de OpenCV Zoo.

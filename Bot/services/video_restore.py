@@ -18,11 +18,14 @@ from config import (
     FFPROBE_BINARY,
     MAX_TELEGRAM_FILE_SIZE,
     RESTORE_FOLDER,
+    RESTORE_FACE_MODEL,
+    RESTORE_INPAINT_MODEL,
     RESTORE_MAX_DURATION_SECONDS,
     RESTORE_MAX_TEXT_MASK_PERCENT,
     RESTORE_PERSON_MODEL,
     RESTORE_PERSON_PROTECTION_PERCENT,
     RESTORE_PROCESS_TIMEOUT_SECONDS,
+    RESTORE_SUPERRES_MODEL,
     RESTORE_TARGET_SIZE_BYTES,
     RESTORE_TEXT_CONFIDENCE,
     RESTORE_TEXT_MODEL,
@@ -34,6 +37,11 @@ try:
 except ImportError:  # La interfaz del bot debe iniciar aunque falte el extra.
     cv2 = None
     np = None
+
+try:
+    import onnxruntime as ort
+except ImportError:  # La restauración fiel conserva un respaldo OpenCV.
+    ort = None
 
 
 logger = logging.getLogger(__name__)
@@ -50,31 +58,40 @@ class RestorationProfile:
     color_strength: float
     detail_strength: float
     upscale_to_1080: bool
+    ai_super_resolution: bool
+    complete_text_removal: bool
 
 
 RESTORATION_PROFILES = {
-    "natural": RestorationProfile(
-        key="natural",
-        label="Natural",
-        color_strength=0.62,
-        detail_strength=0.0,
+    "faithful": RestorationProfile(
+        key="faithful",
+        label="Restauración fiel",
+        color_strength=0.88,
+        detail_strength=0.16,
         upscale_to_1080=False,
+        ai_super_resolution=False,
+        complete_text_removal=True,
     ),
-    "natural_hd": RestorationProfile(
-        key="natural_hd",
-        label="Natural HD",
-        color_strength=0.78,
-        detail_strength=0.22,
-        upscale_to_1080=False,
-    ),
-    "natural_hd_plus": RestorationProfile(
-        key="natural_hd_plus",
-        label="Natural HD+",
-        color_strength=0.78,
-        detail_strength=0.28,
+    "ai_hd": RestorationProfile(
+        key="ai_hd",
+        label="Restauración IA HD",
+        color_strength=0.92,
+        detail_strength=0.24,
         upscale_to_1080=True,
+        ai_super_resolution=True,
+        complete_text_removal=True,
     ),
 }
+
+# Los botones antiguos pueden permanecer en mensajes ya enviados. Mantener estos
+# alias evita que Telegram responda con un error al pulsarlos después de actualizar.
+RESTORATION_PROFILES.update(
+    {
+        "natural": RESTORATION_PROFILES["faithful"],
+        "natural_hd": RESTORATION_PROFILES["faithful"],
+        "natural_hd_plus": RESTORATION_PROFILES["ai_hd"],
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -116,7 +133,7 @@ class RestorationProgress:
 
 
 class PersonProtectionSegmenter:
-    """Protege persona, cabello y extremidades antes de reconstruir píxeles."""
+    """Protege la silueta humana sin convertirla en un polígono artificial."""
 
     def __init__(
         self,
@@ -164,21 +181,6 @@ class PersonProtectionSegmenter:
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
             iterations=1,
         )
-        contours, _ = cv2.findContours(
-            raw_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
-        minimum_component_area = float(width * height) * 0.003
-        for contour in contours:
-            if cv2.contourArea(contour) < minimum_component_area:
-                continue
-            cv2.fillConvexPoly(
-                raw_mask,
-                cv2.convexHull(contour),
-                255,
-            )
-
         protected = raw_mask
         if (
             not scene_changed
@@ -226,7 +228,7 @@ class PersonProtectionSegmenter:
 
 
 class OverlayTextDetector:
-    """Detector PP-OCR limitado a regiones confirmadas y fuera de personas."""
+    """Detecta texto confirmado y sus logos asociados en todo el fotograma."""
 
     def __init__(
         self,
@@ -310,6 +312,12 @@ class OverlayTextDetector:
         self._previous_regions = current_regions
 
         mask = self._refine_glyph_mask(frame, accepted_regions)
+        if protected_mask is None:
+            mask = self._include_associated_symbols(
+                frame,
+                accepted_regions,
+                mask,
+            )
         if protected_mask is not None:
             mask = cv2.bitwise_and(mask, cv2.bitwise_not(protected_mask))
 
@@ -381,38 +389,215 @@ class OverlayTextDetector:
         )
         return cv2.bitwise_and(candidate, regions)
 
+    def _include_associated_symbols(
+        self,
+        frame: Any,
+        text_regions: Any,
+        glyph_mask: Any,
+    ) -> Any:
+        """Incluye iconos pequeños unidos visualmente a un nombre o subtítulo."""
+
+        if not np.count_nonzero(text_regions):
+            return glyph_mask
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        kernel_size = max(
+            9,
+            int(round(min(frame.shape[:2]) / 30)),
+        )
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel_size = min(kernel_size, 41)
+        background = cv2.medianBlur(gray, kernel_size)
+        difference = cv2.absdiff(gray, background)
+        chroma = (
+            frame.max(axis=2).astype(np.int16)
+            - frame.min(axis=2).astype(np.int16)
+        )
+        brightness = frame.max(axis=2)
+        candidates = np.where(
+            (difference > 14)
+            & (chroma < 45)
+            & (brightness > 175),
+            255,
+            0,
+        ).astype(np.uint8)
+        candidates = cv2.morphologyEx(
+            candidates,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        )
+
+        symbols = np.zeros_like(glyph_mask)
+        contours, _ = cv2.findContours(
+            text_regions,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        frame_height, frame_width = frame.shape[:2]
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if width <= 0 or height <= 0:
+                continue
+            pad_x = int(round(height * 1.4))
+            pad_y = int(round(height * 3.2))
+            x0 = max(0, x - pad_x)
+            y0 = max(0, y - pad_y)
+            x1 = min(frame_width, x + width + pad_x)
+            y1 = min(frame_height, y + height + pad_y)
+            candidate_roi = candidates[y0:y1, x0:x1]
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                candidate_roi,
+                connectivity=8,
+            )
+            minimum_area = max(20, int(round(height * height * 0.08)))
+            for component_index in range(1, count):
+                rx, ry, rw, rh, area = (
+                    int(value)
+                    for value in stats[component_index]
+                )
+                gx = x0 + rx
+                gy = y0 + ry
+                distance_x = max(
+                    x - (gx + rw),
+                    gx - (x + width),
+                    0,
+                )
+                distance_y = max(
+                    y - (gy + rh),
+                    gy - (y + height),
+                    0,
+                )
+                if (
+                    area < minimum_area
+                    or area > width * height * 1.8
+                    or rw > height * 3
+                    or rh > height * 3
+                    or distance_x > height * 0.5
+                    or distance_y > height * 2.8
+                ):
+                    continue
+
+                component = np.where(
+                    labels == component_index,
+                    255,
+                    0,
+                ).astype(np.uint8)
+                component_contours, _ = cv2.findContours(
+                    component,
+                    cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                for component_contour in component_contours:
+                    shifted = component_contour + np.array(
+                        [[[x0, y0]]],
+                        dtype=np.int32,
+                    )
+                    hull = cv2.convexHull(shifted)
+                    hull_x, hull_y, hull_width, hull_height = (
+                        cv2.boundingRect(hull)
+                    )
+                    roughly_square = (
+                        min(hull_width, hull_height)
+                        >= max(hull_width, hull_height) * 0.45
+                    )
+                    if roughly_square:
+                        symbol_padding = max(
+                            3,
+                            int(round(height * 0.20)),
+                        )
+                        cv2.rectangle(
+                            symbols,
+                            (
+                                max(0, hull_x - symbol_padding),
+                                max(0, hull_y - symbol_padding),
+                            ),
+                            (
+                                min(
+                                    frame_width - 1,
+                                    hull_x + hull_width + symbol_padding,
+                                ),
+                                min(
+                                    frame_height - 1,
+                                    hull_y + hull_height + symbol_padding,
+                                ),
+                            ),
+                            255,
+                            thickness=cv2.FILLED,
+                        )
+                    else:
+                        cv2.drawContours(
+                            symbols,
+                            [shifted],
+                            -1,
+                            255,
+                            thickness=cv2.FILLED,
+                        )
+
+        combined = cv2.bitwise_or(glyph_mask, symbols)
+        dilation = max(
+            2,
+            int(round(min(frame.shape[:2]) / 300)),
+        )
+        return cv2.dilate(
+            combined,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (dilation * 2 + 1, dilation * 2 + 1),
+            ),
+            iterations=1,
+        )
+
 
 class TemporalNaturalColor:
-    """Balance de blancos y saturación suavizados para evitar parpadeos."""
+    """Detecta filtros cromáticos y los corrige sin perseguir cada fotograma."""
 
     def __init__(self, profile: RestorationProfile) -> None:
         self.profile = profile
         self._gains: Any | None = None
+        self._saturation_scale: float | None = None
         self._previous_histogram: Any | None = None
 
-    def apply(self, frame: Any) -> Any:
+    def apply(
+        self,
+        frame: Any,
+        *,
+        protected_mask: Any | None = None,
+    ) -> Any:
         if cv2 is None or np is None:
             raise RuntimeError("OpenCV y NumPy no están disponibles.")
 
         scene_changed = self._scene_changed(frame)
-        estimated = self._estimate_gains(frame)
+        estimated, estimated_saturation_scale = self._estimate_correction(
+            frame
+        )
         desired = 1.0 + (estimated - 1.0) * self.profile.color_strength
 
         if self._gains is None or scene_changed:
             self._gains = desired
+            self._saturation_scale = estimated_saturation_scale
         else:
-            self._gains = self._gains * 0.92 + desired * 0.08
+            self._gains = self._gains * 0.94 + desired * 0.06
+            self._saturation_scale = (
+                float(self._saturation_scale) * 0.94
+                + estimated_saturation_scale * 0.06
+            )
 
-        corrected = frame.astype(np.float32)
-        corrected *= self._gains.reshape(1, 1, 3)
-        corrected = np.clip(corrected, 0, 255).astype(np.uint8)
-        corrected = self._reduce_excess_saturation(corrected)
+        corrected = self._apply_spatial_white_balance(
+            frame,
+            protected_mask=protected_mask,
+        )
+        corrected = self._reduce_excess_saturation(
+            corrected,
+            protected_mask=protected_mask,
+        )
+        corrected = self._natural_tone_curve(corrected)
 
         if self.profile.detail_strength > 0:
             corrected = self._local_contrast(corrected)
         return corrected
 
-    def _estimate_gains(self, frame: Any) -> Any:
+    def _estimate_correction(self, frame: Any) -> tuple[Any, float]:
         height, width = frame.shape[:2]
         scale = min(1.0, 320.0 / max(width, height, 1))
         sample = (
@@ -428,40 +613,134 @@ class TemporalNaturalColor:
         hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
         saturation = hsv[:, :, 1]
         value = hsv[:, :, 2]
-        neutral = (saturation < 92) & (value > 36) & (value < 246)
-        pixels = sample[neutral]
+        middle = (value > 28) & (value < 242)
+        pixels = sample[middle].astype(np.float32)
 
         minimum_pixels = max(64, int(sample.shape[0] * sample.shape[1] * 0.01))
         if len(pixels) < minimum_pixels:
-            middle = (value > 36) & (value < 246)
-            pixels = sample[middle]
-        if len(pixels) < minimum_pixels:
-            return np.ones(3, dtype=np.float32)
+            return np.ones(3, dtype=np.float32), 1.0
 
-        channel_means = np.mean(pixels.astype(np.float32), axis=0)
-        channel_means = np.maximum(channel_means, 1.0)
-        target = float(np.mean(channel_means))
-        gains = target / channel_means
+        power = 4.0
+        channel_norms = np.mean(
+            np.power(np.maximum(pixels, 1.0), power),
+            axis=0,
+        ) ** (1.0 / power)
+        channel_norms = np.maximum(channel_norms, 1.0)
+        target = float(np.mean(channel_norms))
+        global_gains = target / channel_norms
+        global_gains /= max(float(np.mean(global_gains)), 0.001)
+
+        neutral = (saturation < 76) & middle
+        neutral_pixels = sample[neutral].astype(np.float32)
+        if len(neutral_pixels) >= minimum_pixels:
+            neutral_means = np.maximum(
+                np.mean(neutral_pixels, axis=0),
+                1.0,
+            )
+            neutral_target = float(np.mean(neutral_means))
+            neutral_gains = neutral_target / neutral_means
+            neutral_gains /= max(float(np.mean(neutral_gains)), 0.001)
+            global_gains = global_gains * 0.78 + neutral_gains * 0.22
+
+        channel_spread = (
+            float(np.max(channel_norms) - np.min(channel_norms))
+            / max(float(np.mean(channel_norms)), 1.0)
+        )
+        saturation_p75 = float(np.percentile(saturation, 75))
+        cast_strength = float(
+            np.clip((channel_spread - 0.07) / 0.32, 0.0, 1.0)
+        )
+        saturation_evidence = float(
+            np.clip((saturation_p75 - 112.0) / 92.0, 0.12, 1.0)
+        )
+        correction_strength = cast_strength * saturation_evidence
+        gains = 1.0 + (global_gains - 1.0) * correction_strength
+        gains = np.clip(gains, 0.72, 1.42)
         gains /= max(float(np.mean(gains)), 0.001)
-        return np.clip(gains, 0.78, 1.24).astype(np.float32)
 
-    def _reduce_excess_saturation(self, frame: Any) -> Any:
+        saturation_scale = float(
+            np.clip(124.0 / max(saturation_p75, 1.0), 0.46, 1.0)
+        )
+        return gains.astype(np.float32), saturation_scale
+
+    def _apply_spatial_white_balance(
+        self,
+        frame: Any,
+        *,
+        protected_mask: Any | None,
+    ) -> Any:
+        background = frame.astype(np.float32)
+        background *= self._gains.reshape(1, 1, 3)
+        if protected_mask is None:
+            return np.clip(background, 0, 255).astype(np.uint8)
+
+        # El balance de blancos no altera la geometría ni la identidad. Aplicarlo
+        # casi por completo dentro de la persona evita halos del filtro original.
+        person_gains = 1.0 + (self._gains - 1.0) * 0.90
+        person = frame.astype(np.float32)
+        person *= person_gains.reshape(1, 1, 3)
+        alpha = cv2.GaussianBlur(
+            protected_mask.astype(np.float32) / 255.0,
+            (0, 0),
+            sigmaX=4.0,
+        )[:, :, None]
+        corrected = background * (1.0 - alpha) + person * alpha
+        return np.clip(corrected, 0, 255).astype(np.uint8)
+
+    def _reduce_excess_saturation(
+        self,
+        frame: Any,
+        *,
+        protected_mask: Any | None,
+    ) -> Any:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         saturation = hsv[:, :, 1].astype(np.float32)
-        percentile = float(np.percentile(saturation, 75))
-        excess = max(0.0, percentile - 105.0)
-        reduction = min(0.18, excess / 420.0) * self.profile.color_strength
-        if reduction <= 0:
+        background_scale = 1.0 + (
+            float(self._saturation_scale) - 1.0
+        ) * self.profile.color_strength
+        if background_scale >= 0.999:
             return frame
-        saturation *= 1.0 - reduction
+
+        if protected_mask is None:
+            saturation *= background_scale
+        else:
+            person_scale = max(
+                0.62,
+                min(0.96, background_scale + 0.08),
+            )
+            alpha = cv2.GaussianBlur(
+                protected_mask.astype(np.float32) / 255.0,
+                (0, 0),
+                sigmaX=4.0,
+            )
+            scale = (
+                background_scale * (1.0 - alpha)
+                + person_scale * alpha
+            )
+            saturation *= scale
         hsv[:, :, 1] = np.clip(saturation, 0, 255).astype(np.uint8)
         return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    def _natural_tone_curve(self, frame: Any) -> Any:
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        luminance, channel_a, channel_b = cv2.split(lab)
+        values = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        amount = 0.15 * self.profile.color_strength
+        curve = values + amount * (2.0 * values - 1.0) * (
+            4.0 * values * (1.0 - values)
+        )
+        lookup = np.clip(curve * 255.0, 0, 255).astype(np.uint8)
+        luminance = cv2.LUT(luminance, lookup)
+        return cv2.cvtColor(
+            cv2.merge((luminance, channel_a, channel_b)),
+            cv2.COLOR_LAB2BGR,
+        )
 
     def _local_contrast(self, frame: Any) -> Any:
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         luminance, channel_a, channel_b = cv2.split(lab)
         values = np.linspace(0.0, 1.0, 256, dtype=np.float32)
-        amount = self.profile.detail_strength * 0.16
+        amount = self.profile.detail_strength * 0.08
         curve = values + amount * (2.0 * values - 1.0) * (
             4.0 * values * (1.0 - values)
         )
@@ -551,13 +830,379 @@ class ConservativeBackgroundEnhancer:
         return np.clip(output, 0, 255).astype(np.uint8)
 
 
+class FaceIdentityProtector:
+    """Crea una máscara facial para limitar la contribución generativa."""
+
+    def __init__(self, model_path: Path = RESTORE_FACE_MODEL) -> None:
+        if cv2 is None or np is None:
+            raise RuntimeError("OpenCV y NumPy no están disponibles.")
+        if not model_path.is_file():
+            raise RuntimeError(
+                f"No se encontró el detector facial: {model_path.name}"
+            )
+        self._detector = cv2.FaceDetectorYN.create(
+            str(model_path),
+            "",
+            (320, 320),
+            0.72,
+            0.30,
+            5000,
+        )
+        self._previous_mask: Any | None = None
+
+    def detect(self, frame: Any) -> Any:
+        height, width = frame.shape[:2]
+        scale = min(1.0, 640.0 / max(width, height, 1))
+        sample_width = max(32, int(round(width * scale)))
+        sample_height = max(32, int(round(height * scale)))
+        sample = (
+            cv2.resize(
+                frame,
+                (sample_width, sample_height),
+                interpolation=cv2.INTER_AREA,
+            )
+            if scale < 1.0
+            else frame
+        )
+        self._detector.setInputSize((sample.shape[1], sample.shape[0]))
+        _, faces = self._detector.detect(sample)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        if faces is not None:
+            inverse_scale = 1.0 / scale
+            for face in faces:
+                x, y, face_width, face_height = (
+                    float(value) * inverse_scale
+                    for value in face[:4]
+                )
+                center = (
+                    int(round(x + face_width * 0.50)),
+                    int(round(y + face_height * 0.50)),
+                )
+                axes = (
+                    max(4, int(round(face_width * 0.72))),
+                    max(4, int(round(face_height * 0.78))),
+                )
+                cv2.ellipse(
+                    mask,
+                    center,
+                    axes,
+                    0,
+                    0,
+                    360,
+                    255,
+                    thickness=cv2.FILLED,
+                )
+
+        if self._previous_mask is not None:
+            mask = cv2.bitwise_or(mask, self._previous_mask)
+        self._previous_mask = mask
+        return mask
+
+
+class GenerativeTextInpainter:
+    """Reconstruye solo la máscara estrecha de texto con LaMa y respaldo local."""
+
+    def __init__(self, model_path: Path = RESTORE_INPAINT_MODEL) -> None:
+        self._session: Any | None = None
+        self._model_path = model_path
+        if ort is not None and model_path.is_file():
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = max(
+                1,
+                min(8, os.cpu_count() or 1),
+            )
+            options.inter_op_num_threads = 1
+            options.graph_optimization_level = (
+                ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            )
+            options.log_severity_level = 3
+            self._session = ort.InferenceSession(
+                str(model_path),
+                sess_options=options,
+                providers=["CPUExecutionProvider"],
+            )
+
+    @property
+    def available(self) -> bool:
+        return self._session is not None
+
+    def apply(
+        self,
+        frame: Any,
+        mask: Any,
+        *,
+        protected_mask: Any | None,
+        face_mask: Any | None = None,
+    ) -> Any:
+        if not np.count_nonzero(mask):
+            return frame
+
+        face_text_mask = np.zeros_like(mask)
+        non_face_mask = mask
+        if face_mask is not None:
+            face_text_mask = cv2.bitwise_and(mask, face_mask)
+            non_face_mask = cv2.bitwise_and(
+                mask,
+                cv2.bitwise_not(face_mask),
+            )
+
+        restored = frame
+        if np.count_nonzero(non_face_mask):
+            restored = self._apply_non_face_mask(
+                restored,
+                non_face_mask,
+                protected_mask=protected_mask,
+            )
+        if np.count_nonzero(face_text_mask):
+            # Bajo texto facial no existen píxeles originales que recuperar.
+            # Telea interpola el vecindario sin un modelo generativo de rostros.
+            restored = cv2.inpaint(
+                restored,
+                face_text_mask,
+                inpaintRadius=4.0,
+                flags=cv2.INPAINT_TELEA,
+            )
+        return restored
+
+    def _apply_non_face_mask(
+        self,
+        frame: Any,
+        mask: Any,
+        *,
+        protected_mask: Any | None,
+    ) -> Any:
+        overlap_fraction = 0.0
+        if protected_mask is not None:
+            overlap = cv2.bitwise_and(mask, protected_mask)
+            overlap_fraction = float(np.count_nonzero(overlap)) / max(
+                float(np.count_nonzero(mask)),
+                1.0,
+            )
+        if self._session is None or overlap_fraction < 0.02:
+            return cv2.inpaint(
+                frame,
+                mask,
+                inpaintRadius=4.0,
+                flags=cv2.INPAINT_TELEA,
+            )
+
+        try:
+            return self._apply_model(frame, mask)
+        except Exception:
+            logger.exception(
+                "LaMa falló; se usará reconstrucción local conservadora."
+            )
+            return cv2.inpaint(
+                frame,
+                mask,
+                inpaintRadius=4.0,
+                flags=cv2.INPAINT_TELEA,
+            )
+
+    def _apply_model(self, frame: Any, mask: Any) -> Any:
+        height, width = frame.shape[:2]
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return frame
+
+        box_x0 = int(xs.min())
+        box_x1 = int(xs.max()) + 1
+        box_y0 = int(ys.min())
+        box_y1 = int(ys.max()) + 1
+        box_width = box_x1 - box_x0
+        box_height = box_y1 - box_y0
+        side = max(256, max(box_width, box_height) * 3)
+        side = min(side, min(width, height))
+        center_x = (box_x0 + box_x1) // 2
+        center_y = (box_y0 + box_y1) // 2
+        x0 = max(0, min(width - side, center_x - side // 2))
+        y0 = max(0, min(height - side, center_y - side // 2))
+        x1 = x0 + side
+        y1 = y0 + side
+
+        crop = frame[y0:y1, x0:x1]
+        crop_mask = mask[y0:y1, x0:x1]
+        image_512 = cv2.resize(
+            crop,
+            (512, 512),
+            interpolation=cv2.INTER_AREA,
+        )
+        mask_512 = cv2.resize(
+            crop_mask,
+            (512, 512),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        rgb = cv2.cvtColor(image_512, cv2.COLOR_BGR2RGB)
+        image_tensor = np.transpose(
+            rgb.astype(np.float32) / 255.0,
+            (2, 0, 1),
+        )[None]
+        mask_tensor = (
+            mask_512.astype(np.float32) / 255.0
+        )[None, None]
+        output = self._session.run(
+            None,
+            {
+                "image": image_tensor,
+                "mask": mask_tensor,
+            },
+        )[0]
+        generated = np.transpose(output[0], (1, 2, 0))
+        generated = np.clip(generated, 0, 255).astype(np.uint8)
+        generated = cv2.cvtColor(generated, cv2.COLOR_RGB2BGR)
+        generated = cv2.resize(
+            generated,
+            (side, side),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+        alpha = cv2.GaussianBlur(
+            crop_mask.astype(np.float32) / 255.0,
+            (0, 0),
+            sigmaX=1.0,
+        )[:, :, None]
+        restored_crop = (
+            crop.astype(np.float32) * (1.0 - alpha)
+            + generated.astype(np.float32) * alpha
+        )
+        restored = frame.copy()
+        restored[y0:y1, x0:x1] = np.clip(
+            restored_crop,
+            0,
+            255,
+        ).astype(np.uint8)
+        return restored
+
+
+class IdentityLockedSuperResolver:
+    """Aplica Real-ESRGAN 2× con mezcla limitada en persona y rostro."""
+
+    def __init__(
+        self,
+        model_path: Path = RESTORE_SUPERRES_MODEL,
+    ) -> None:
+        if ort is None:
+            raise RuntimeError("ONNX Runtime DirectML no está disponible.")
+        if not model_path.is_file():
+            raise RuntimeError(
+                f"No se encontró el superescalador: {model_path.name}"
+            )
+        options = ort.SessionOptions()
+        options.enable_mem_pattern = False
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        options.log_severity_level = 3
+        available_providers = set(ort.get_available_providers())
+        providers = ["CPUExecutionProvider"]
+        if "DmlExecutionProvider" in available_providers:
+            providers.insert(0, "DmlExecutionProvider")
+        self._session = ort.InferenceSession(
+            str(model_path),
+            sess_options=options,
+            providers=providers,
+        )
+        self._input_name = self._session.get_inputs()[0].name
+
+    @property
+    def provider(self) -> str:
+        return self._session.get_providers()[0]
+
+    def apply(
+        self,
+        frame: Any,
+        *,
+        protected_mask: Any,
+        face_mask: Any,
+        target_width: int,
+        target_height: int,
+    ) -> Any:
+        height, width = frame.shape[:2]
+        scale = min(1.0, 720.0 / max(width, height, 1))
+        input_width = max(32, int(round(width * scale)))
+        input_height = max(32, int(round(height * scale)))
+        input_width -= input_width % 2
+        input_height -= input_height % 2
+        sample = cv2.resize(
+            frame,
+            (input_width, input_height),
+            interpolation=(
+                cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
+            ),
+        )
+        rgb = cv2.cvtColor(sample, cv2.COLOR_BGR2RGB)
+        tensor = np.transpose(
+            rgb.astype(np.float32) / 255.0,
+            (2, 0, 1),
+        )[None]
+        output = self._session.run(
+            None,
+            {self._input_name: tensor},
+        )[0]
+        ai_frame = np.transpose(output[0], (1, 2, 0))
+        ai_frame = np.clip(ai_frame, 0.0, 1.0)
+        ai_frame = cv2.cvtColor(
+            (ai_frame * 255.0).astype(np.uint8),
+            cv2.COLOR_RGB2BGR,
+        )
+
+        ai_frame = cv2.resize(
+            ai_frame,
+            (target_width, target_height),
+            interpolation=cv2.INTER_LANCZOS4,
+        )
+        base = cv2.resize(
+            frame,
+            (target_width, target_height),
+            interpolation=cv2.INTER_LANCZOS4,
+        )
+        person = cv2.resize(
+            protected_mask,
+            (target_width, target_height),
+            interpolation=cv2.INTER_LINEAR,
+        ).astype(np.float32) / 255.0
+        face = cv2.resize(
+            face_mask,
+            (target_width, target_height),
+            interpolation=cv2.INTER_LINEAR,
+        ).astype(np.float32) / 255.0
+        person = cv2.GaussianBlur(person, (0, 0), sigmaX=2.0)
+        face = cv2.GaussianBlur(face, (0, 0), sigmaX=3.0)
+
+        low_weight = np.full(
+            (target_height, target_width),
+            0.34,
+            dtype=np.float32,
+        )
+        low_weight = low_weight * (1.0 - person) + 0.22 * person
+        low_weight = low_weight * (1.0 - face) + 0.05 * face
+        detail_weight = np.full_like(low_weight, 0.26)
+        detail_weight = detail_weight * (1.0 - person) + 0.17 * person
+        detail_weight = detail_weight * (1.0 - face) + 0.08 * face
+
+        ai_float = ai_frame.astype(np.float32)
+        base_float = base.astype(np.float32)
+        detail = ai_float - cv2.GaussianBlur(
+            ai_float,
+            (0, 0),
+            sigmaX=1.0,
+        )
+        low_weight = low_weight[:, :, None]
+        detail_weight = detail_weight[:, :, None]
+        restored = (
+            base_float * (1.0 - low_weight)
+            + ai_float * low_weight
+            + detail * detail_weight
+        )
+        return np.clip(restored, 0, 255).astype(np.uint8)
+
+
 class VideoRestorer:
     def __init__(self) -> None:
         self.ffmpeg = FFMPEG_BINARY
         self.ffprobe = FFPROBE_BINARY
 
-    def availability_text(self) -> str:
+    def availability_text(self, preset: str | None = None) -> str:
         missing: list[str] = []
+        profile = RESTORATION_PROFILES.get(preset or "ai_hd")
         if not _binary_exists(self.ffmpeg):
             missing.append("ffmpeg")
         if not _binary_exists(self.ffprobe):
@@ -572,6 +1217,16 @@ class VideoRestorer:
             missing.append(RESTORE_TEXT_MODEL.name)
         if not RESTORE_PERSON_MODEL.is_file():
             missing.append(RESTORE_PERSON_MODEL.name)
+        if not RESTORE_FACE_MODEL.is_file():
+            missing.append(RESTORE_FACE_MODEL.name)
+        if profile is not None and profile.complete_text_removal:
+            if ort is None:
+                missing.append("onnxruntime-directml")
+            if not RESTORE_INPAINT_MODEL.is_file():
+                missing.append(RESTORE_INPAINT_MODEL.name)
+        if profile is not None and profile.ai_super_resolution:
+            if not RESTORE_SUPERRES_MODEL.is_file():
+                missing.append(RESTORE_SUPERRES_MODEL.name)
         return "disponible" if not missing else "faltan " + ", ".join(missing)
 
     def create_paths(
@@ -631,7 +1286,7 @@ class VideoRestorer:
                 error=f"Preset desconocido: {preset}",
             )
 
-        availability = self.availability_text()
+        availability = self.availability_text(profile.key)
         if availability != "disponible":
             return RestorationResult(
                 False,
@@ -740,6 +1395,11 @@ class VideoRestorer:
                 if encoder == "h264_nvenc"
                 else "OpenCV + FFmpeg · libx264"
             )
+            if profile.ai_super_resolution:
+                encoder_name = (
+                    "Real-ESRGAN 2× + protección facial + "
+                    f"{encoder_name}"
+                )
             result = RestorationResult(
                 True,
                 "Video restaurado correctamente.",
@@ -808,6 +1468,13 @@ class VideoRestorer:
         )
         color_restorer = TemporalNaturalColor(profile)
         quality_enhancer = ConservativeBackgroundEnhancer(profile)
+        text_inpainter = GenerativeTextInpainter()
+        face_protector = FaceIdentityProtector()
+        super_resolver = (
+            IdentityLockedSuperResolver()
+            if profile.ai_super_resolution
+            else None
+        )
         audio_copied = (
             probe.has_audio and probe.audio_codec in _MP4_COPY_AUDIO_CODECS
         )
@@ -841,7 +1508,12 @@ class VideoRestorer:
                 raise RuntimeError("FFmpeg no abrió la entrada de fotogramas.")
 
             while True:
-                if monotonic() - started_at > RESTORE_PROCESS_TIMEOUT_SECONDS:
+                process_timeout = (
+                    max(RESTORE_PROCESS_TIMEOUT_SECONDS, 24 * 60 * 60)
+                    if profile.ai_super_resolution
+                    else RESTORE_PROCESS_TIMEOUT_SECONDS
+                )
+                if monotonic() - started_at > process_timeout:
                     raise TimeoutError("Tiempo de restauración agotado.")
 
                 ok, frame = capture.read()
@@ -849,25 +1521,44 @@ class VideoRestorer:
                     break
 
                 protected_mask = person_protector.detect(frame)
+                face_mask = face_protector.detect(frame)
                 mask = text_detector.detect(
                     frame,
-                    protected_mask=protected_mask,
+                    protected_mask=(
+                        None
+                        if profile.complete_text_removal
+                        else protected_mask
+                    ),
                 )
                 if np.count_nonzero(mask):
-                    frame = cv2.inpaint(
+                    frame = text_inpainter.apply(
                         frame,
                         mask,
-                        inpaintRadius=2.0,
-                        flags=cv2.INPAINT_NS,
+                        protected_mask=protected_mask,
+                        face_mask=face_mask,
                     )
                     frames_with_text += 1
 
-                frame = color_restorer.apply(frame)
+                frame = color_restorer.apply(
+                    frame,
+                    protected_mask=protected_mask,
+                )
                 frame = quality_enhancer.apply(
                     frame,
                     protected_mask=protected_mask,
                 )
-                if frame.shape[1] != target_width or frame.shape[0] != target_height:
+                if super_resolver is not None:
+                    frame = super_resolver.apply(
+                        frame,
+                        protected_mask=protected_mask,
+                        face_mask=face_mask,
+                        target_width=target_width,
+                        target_height=target_height,
+                    )
+                elif (
+                    frame.shape[1] != target_width
+                    or frame.shape[0] != target_height
+                ):
                     interpolation = (
                         cv2.INTER_LANCZOS4
                         if target_width > frame.shape[1]
@@ -897,8 +1588,12 @@ class VideoRestorer:
                         progress_callback,
                         report_percent,
                         (
-                            "Protegiendo personas, detectando texto y "
-                            "recuperando detalle"
+                            "Quitando texto, neutralizando filtros y "
+                            + (
+                                "recuperando detalle con IA"
+                                if profile.ai_super_resolution
+                                else "protegiendo la imagen original"
+                            )
                         ),
                         frames_processed=frames_processed,
                         total_frames=total_frames,

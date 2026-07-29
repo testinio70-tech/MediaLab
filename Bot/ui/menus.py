@@ -85,32 +85,30 @@ def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
 
 def restoration_menu() -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        "🪄 Restauración integral de video\n\n"
-        "MediaLab revisará cada fotograma con detección de texto y protección "
-        "de personas. Solo reconstruirá zonas seguras del fondo; rostro, "
-        "cabello y cuerpo no se regeneran.\n\n"
-        "También limpiará ruido, corregirá color y aplicará un enfoque "
-        "suave. Es un proceso de alta calidad y puede tardar varios minutos.\n\n"
-        "Selecciona el acabado:"
+        "🪄 Restauración fotograma por fotograma\n\n"
+        "Las dos opciones detectan filtros anormales, recuperan iluminación "
+        "natural y eliminan texto y logotipos completos.\n\n"
+        "🌿 Restauración fiel\n"
+        "Conserva la resolución y la estructura original. Corrige color, "
+        "ruido y nitidez sin reinterpretar a la persona.\n\n"
+        "🧠 Restauración IA HD\n"
+        "Añade superresolución 2× controlada y microdetalle en piel, cabello "
+        "y extremidades. El rostro recibe una protección más fuerte para "
+        "mantener identidad y proporciones.\n\n"
+        "Selecciona el proceso:"
     )
     keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "🌿 Natural",
-                    callback_data="restore:preset:natural",
+                    "🌿 Restauración fiel",
+                    callback_data="restore:preset:faithful",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "✨ Natural HD · recomendado",
-                    callback_data="restore:preset:natural_hd",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔎 Natural HD+ · hasta 1080p",
-                    callback_data="restore:preset:natural_hd_plus",
+                    "🧠 Restauración IA HD · recomendado",
+                    callback_data="restore:preset:ai_hd",
                 )
             ],
             [InlineKeyboardButton("↩️ Mejoras", callback_data="menu:enhance")],
@@ -125,21 +123,40 @@ def restoration_prompt(
     max_input_mb: int,
     max_duration_seconds: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
+    is_ai = "IA" in preset_label
+    detail_text = (
+        "• superresolución neuronal 2× con mezcla limitada;\n"
+        "• microdetalle suave en piel, cabello y extremidades;\n"
+        "• bloqueo reforzado de rostro, identidad y proporciones;\n"
+        "• salida máxima de 1080p.\n"
+        if is_ai
+        else (
+            "• conservación de la geometría y resolución original;\n"
+            "• reducción de ruido y nitidez suave sin regenerar personas;\n"
+            "• salida máxima de 1080p cuando sea necesario reducirla.\n"
+        )
+    )
+    estimate_text = (
+        "🕰️ Puede tardar entre 1 y 6 horas por cada minuto de video "
+        "en este equipo."
+        if is_ai
+        else "⏳ Tardará notablemente más que una descarga normal."
+    )
     text = (
         f"🪄 Restauración integral · {preset_label}\n\n"
         "Envíame ahora un video normal o un archivo de video.\n\n"
         "El proceso realizará:\n"
         "• revisión fotograma por fotograma;\n"
-        "• detección de texto mediante un modelo especializado;\n"
-        "• protección de rostro, cabello, manos y cuerpo;\n"
-        "• eliminación de texto solo en zonas seguras del fondo;\n"
-        "• restauración de temperatura, saturación y contraste;\n"
-        "• reducción de ruido y enfoque suave sin superar 1080p.\n\n"
+        "• detección de texto y logotipos asociados;\n"
+        "• eliminación completa con reconstrucción local limitada;\n"
+        "• detección y corrección de filtros de aplicación;\n"
+        "• balance natural de iluminación, temperatura y saturación;\n"
+        f"{detail_text}\n"
         f"📦 Entrada máxima: {max_input_mb} MB\n"
         f"⏱️ Duración máxima inicial: {max_duration_seconds} s\n\n"
-        "⏳ Tardará notablemente más que una descarga normal.\n"
-        "🛡️ Si un texto cruza una persona, MediaLab conservará esa parte "
-        "antes que arriesgar su identidad o anatomía."
+        f"{estimate_text}\n"
+        "🛡️ La reconstrucción se limita a la sobreimpresión y al "
+        "microdetalle; no cambia forma, pose ni proporciones."
     )
     keyboard = InlineKeyboardMarkup(
         [
@@ -185,7 +202,7 @@ def feature_menu(feature: str) -> tuple[str, InlineKeyboardMarkup]:
         "photo": (
             "🖼️ Foto IA x2\n\n"
             "Duplicará las dimensiones y reconstruirá detalles con IA.\n\n"
-            "Estado: en preparación para MediaLab 2.4.0-alpha.2."
+            "Estado: en preparación; todavía no disponible."
         ),
         "fast1080": (
             "⚡ Super rápido 1080\n\n"

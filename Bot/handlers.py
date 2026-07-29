@@ -1096,11 +1096,12 @@ async def _handle_restore_media(
     if profile is None:
         await message.reply_text(
             "❌ No encuentro el acabado elegido.\n\n"
-            "Abre /restorevideo y selecciona Natural, Natural HD o Natural HD+."
+            "Abre /restorevideo y selecciona Restauración fiel o "
+            "Restauración IA HD."
         )
         return False
 
-    availability = VIDEO_RESTORER.availability_text()
+    availability = VIDEO_RESTORER.availability_text(preset)
     if availability != "disponible":
         logger.error("Restauración integral no disponible: %s", availability)
         await message.reply_text(
@@ -1178,6 +1179,7 @@ async def _enqueue_restore(
     preset: str,
 ) -> EnhancementQueueReceipt:
     profile = RESTORATION_PROFILES[preset]
+    is_ai = profile.ai_super_resolution
 
     async def runner() -> None:
         await _process_restore_job(
@@ -1201,8 +1203,13 @@ async def _enqueue_restore(
             f"🪄 Iniciando restauración · {profile.label}…\n\n"
             "📍 Estado: descargando el video desde Telegram\n"
             "⚙️ Cola: mejoras de video\n\n"
-            "🧠 Después se analizará fotograma por fotograma. Es normal que "
-            "tarde notablemente más que una descarga."
+            "🧠 Después se analizará fotograma por fotograma.\n"
+            + (
+                "🕰️ El modo IA puede tardar entre 1 y 6 horas por "
+                "cada minuto de video en este equipo."
+                if is_ai
+                else "⏳ Es normal que tarde notablemente más que una descarga."
+            )
         ),
         runner=runner,
     )
@@ -1221,7 +1228,7 @@ async def _announce_restore_queue_receipt(
                 status_message,
                 "🕒 Video añadido a la cola de restauración\n\n"
                 f"📍 Posición en espera: {receipt.position}\n"
-                "⚙️ Motor: PP-OCR + protección humana + OpenCV\n\n"
+                "⚙️ Motor: PP-OCR + LaMa + protección humana\n\n"
                 "⏳ La restauración de alta calidad puede tardar varios "
                 "minutos.\n"
                 "Te avisaré cuando comience.",
@@ -1264,6 +1271,7 @@ async def _process_restore_job(
     preset: str,
 ) -> None:
     profile = RESTORATION_PROFILES[preset]
+    is_ai = profile.ai_super_resolution
     input_path, output_path = VIDEO_RESTORER.create_paths(
         user_id=user_id,
         file_unique_id=file_unique_id,
@@ -1312,13 +1320,20 @@ async def _process_restore_job(
         status_message,
         f"🪄 Restaurando video · {profile.label}…\n\n"
         f"📦 Entrada: {format_file_size(real_size)}\n"
-        "🔤 Texto: análisis conservador de todos los fotogramas\n"
-        "🛡️ Identidad: rostro, cabello y cuerpo protegidos\n"
-        "🎨 Color: balance temporal y saturación natural\n"
-        "✨ Detalle: limpieza y enfoque suave fuera de la persona\n"
-        "🎞️ Salida: máximo 1080p\n\n"
-        "⏳ Este proceso es deliberadamente más lento que una descarga o "
-        "Super rápido 1080. Puede tardar varios minutos.",
+        "🔤 Texto: eliminación completa con reconstrucción local\n"
+        "🎨 Filtros: detección de tinte, saturación e iluminación anormales\n"
+        "🛡️ Identidad: rostro, forma y proporciones protegidos\n"
+        + (
+            "🧠 Detalle: superresolución 2× y microtextura controlada\n"
+            "🎞️ Salida: máximo 1080p\n\n"
+            "🕰️ Estimación: 1–6 horas por cada minuto de video."
+            if is_ai
+            else (
+                "✨ Detalle: limpieza y enfoque fiel a la fuente\n"
+                "🎞️ Salida: conserva la resolución original\n\n"
+                "⏳ Es más lento que una descarga normal."
+            )
+        ),
     )
 
     progress_queue: asyncio.Queue[RestorationProgress] = asyncio.Queue()
@@ -1368,8 +1383,13 @@ async def _process_restore_job(
             f"📊 Progreso: {progress.percent}%\n"
             f"📍 Etapa: {progress.stage}"
             f"{frame_line}\n\n"
-            "🛡️ La persona permanece protegida.\n"
-            "⏳ Es normal que este proceso tarde varios minutos.",
+            "🛡️ Identidad, forma y proporciones permanecen protegidas.\n"
+            + (
+                "🕰️ La reconstrucción IA fotograma por fotograma puede "
+                "tardar más de una hora."
+                if is_ai
+                else "⏳ Es normal que este proceso tarde varios minutos."
+            ),
         )
         last_reported_percent = progress.percent
 
@@ -1437,7 +1457,7 @@ async def _process_restore_job(
         await _safe_edit(
             status_message,
             "⚠️ La salida superó el límite configurado para Telegram.\n\n"
-            "Prueba con un video más corto o con el acabado Natural.",
+            "Prueba con un video más corto o con Restauración fiel.",
         )
         return
 

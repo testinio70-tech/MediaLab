@@ -81,11 +81,20 @@ STATE_FOLDER = BOT_FOLDER / "state"
 FAST1080_FOLDER = TEMP_FOLDER / "Fast1080"
 RESTORE_FOLDER = TEMP_FOLDER / "RestoreHD"
 MODEL_FOLDER = BOT_FOLDER / "models"
+TOOLS_FOLDER = ROOT / "Tools"
+RESTORE_AI_MODEL_FOLDER = TOOLS_FOLDER / "Models"
 RESTORE_TEXT_MODEL = (
     MODEL_FOLDER / "text_detection_en_ppocrv3_2023may.onnx"
 )
 RESTORE_PERSON_MODEL = (
     MODEL_FOLDER / "human_segmentation_pphumanseg_2023mar.onnx"
+)
+RESTORE_FACE_MODEL = MODEL_FOLDER / "face_detection_yunet_2023mar.onnx"
+RESTORE_INPAINT_MODEL = (
+    RESTORE_AI_MODEL_FOLDER / "LaMa" / "inpainting_lama_2025jan.onnx"
+)
+RESTORE_SUPERRES_MODEL = (
+    RESTORE_AI_MODEL_FOLDER / "RealESRGAN" / "real_esrgan_x2.onnx"
 )
 HEARTBEAT_FILE = STATE_FOLDER / "heartbeat.json"
 
@@ -200,4 +209,4 @@ FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg"
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.4.0-alpha.4"
+APP_VERSION = "2.4.0-alpha.5"
