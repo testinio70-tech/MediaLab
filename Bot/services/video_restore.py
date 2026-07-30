@@ -1114,6 +1114,12 @@ class IdentityLockedSuperResolver:
         face_mask: Any,
         target_width: int,
         target_height: int,
+        background_ai_weight: float = 0.34,
+        person_ai_weight: float = 0.22,
+        face_ai_weight: float = 0.05,
+        background_detail_weight: float = 0.26,
+        person_detail_weight: float = 0.17,
+        face_detail_weight: float = 0.08,
     ) -> Any:
         height, width = frame.shape[:2]
         scale = min(1.0, 720.0 / max(width, height, 1))
@@ -1169,14 +1175,26 @@ class IdentityLockedSuperResolver:
 
         low_weight = np.full(
             (target_height, target_width),
-            0.34,
+            background_ai_weight,
             dtype=np.float32,
         )
-        low_weight = low_weight * (1.0 - person) + 0.22 * person
-        low_weight = low_weight * (1.0 - face) + 0.05 * face
-        detail_weight = np.full_like(low_weight, 0.26)
-        detail_weight = detail_weight * (1.0 - person) + 0.17 * person
-        detail_weight = detail_weight * (1.0 - face) + 0.08 * face
+        low_weight = (
+            low_weight * (1.0 - person)
+            + person_ai_weight * person
+        )
+        low_weight = low_weight * (1.0 - face) + face_ai_weight * face
+        detail_weight = np.full_like(
+            low_weight,
+            background_detail_weight,
+        )
+        detail_weight = (
+            detail_weight * (1.0 - person)
+            + person_detail_weight * person
+        )
+        detail_weight = (
+            detail_weight * (1.0 - face)
+            + face_detail_weight * face
+        )
 
         ai_float = ai_frame.astype(np.float32)
         base_float = base.astype(np.float32)

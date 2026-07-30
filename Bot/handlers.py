@@ -5,6 +5,7 @@ import logging
 import secrets
 import time
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -32,6 +33,9 @@ from config import (
     MAX_PENDING_SELECTIONS_PER_USER,
     MAX_TELEGRAM_FILE_SIZE,
     MAX_TELEGRAM_PHOTO_SIZE,
+    PHOTO_AI_MAX_BATCH,
+    PHOTO_AI_MAX_INPUT_BYTES,
+    PHOTO_AI_MAX_INPUT_MB,
     PRIVILEGED_USERS,
     RESTORE_MAX_DURATION_SECONDS,
     RESTORE_MAX_INPUT_BYTES,
@@ -42,9 +46,14 @@ from config import (
 from engines.instagram.ytdlp import InstagramYTDLPEngine
 from engines.tiktok.tikwm import TikWMEngine
 from engines.tiktok.ytdlp import TikTokYTDLPEngine
-from media_info import enrich_download_result, format_result_details
+from media_info import (
+    enrich_download_result,
+    format_resolution,
+    probe_video_resolution,
+)
 from models import DownloadResult
 from services.download_queue import DOWNLOAD_QUEUE, DownloadJob, QueueReceipt
+from services.audio_extractor import AUDIO_EXTRACTOR, AudioDownloadResult
 from services.enhancement_queue import (
     ENHANCEMENT_QUEUE,
     EnhancementJob,
@@ -52,6 +61,8 @@ from services.enhancement_queue import (
 )
 from services.file_cleanup import delete_sent_file, delete_sent_files
 from services.heartbeat import HEARTBEAT_SERVICE
+from services.image_enhancer import PHOTO_AI_ENHANCER, PHOTO_AI_MODES
+from services.image_queue import IMAGE_QUEUE, ImageBatchJob
 from services.instagram import (
     InstagramDownloadResult,
     download_instagram_media,
@@ -67,6 +78,7 @@ from services.tiktok_photos import (
     is_tiktok_photo_url,
 )
 from services.tiktok_urls import resolve_tiktok_url
+from services.upload_coordinator import TELEGRAM_UPLOAD_LOCK
 from services.video_fast1080 import FAST1080_ENHANCER
 from services.video_restore import (
     RESTORATION_PROFILES,
@@ -74,6 +86,7 @@ from services.video_restore import (
     RestorationProgress,
 )
 from ui.menus import (
+    audio_prompt,
     download_menu,
     enhancement_menu,
     fast1080_prompt,
@@ -82,6 +95,8 @@ from ui.menus import (
     help_menu,
     help_section,
     main_menu,
+    photo_ai_menu,
+    photo_ai_prompt,
     restoration_menu,
     restoration_prompt,
     status_keyboard,
@@ -93,7 +108,9 @@ logger = logging.getLogger(__name__)
 
 _CALLBACK_PREFIX = "tikeng"
 _PENDING_KEY = "pending_tiktok_requests"
+_PHOTO_BATCHES_KEY = "pending_photo_ai_batches"
 _MEDIA_GROUP_SIZE = 10
+_PHOTO_BATCH_SETTLE_SECONDS = 1.2
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 _VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".webm"}
@@ -103,6 +120,14 @@ TIKTOK_ENGINES = {
     "ytdlp": TikTokYTDLPEngine(),
 }
 INSTAGRAM_YTDLP = InstagramYTDLPEngine()
+
+
+@dataclass(slots=True, frozen=True)
+class ReceivedImage:
+    file_id: str
+    file_unique_id: str
+    file_name: str
+    file_size: int
 
 
 # ==========================================================
@@ -180,6 +205,23 @@ async def restorevideo_command(
     context.user_data.pop("menu_mode", None)
     context.user_data.pop("restore_preset", None)
     text, keyboard = restoration_menu()
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def audio_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    context.user_data["menu_mode"] = "audio"
+    text, keyboard = audio_prompt()
     await message.reply_text(text, reply_markup=keyboard)
 
 
@@ -288,11 +330,15 @@ async def handle_navigation(
 
     data = str(query.data or "")
 
-    if data != "menu:feature:fast1080" and not data.startswith(
-        "restore:preset:"
+    persistent_modes = {"menu:feature:fast1080", "menu:audio"}
+    if (
+        data not in persistent_modes
+        and not data.startswith("restore:preset:")
+        and not data.startswith("photo:preset:")
     ):
         context.user_data.pop("menu_mode", None)
         context.user_data.pop("restore_preset", None)
+        context.user_data.pop("photo_preset", None)
 
     if data == "menu:main":
         text, keyboard = main_menu(
@@ -301,6 +347,9 @@ async def handle_navigation(
         )
     elif data == "menu:download":
         text, keyboard = download_menu()
+    elif data == "menu:audio":
+        context.user_data["menu_mode"] = "audio"
+        text, keyboard = audio_prompt()
     elif data == "menu:enhance":
         text, keyboard = enhancement_menu()
     elif data == "menu:restore":
@@ -325,6 +374,27 @@ async def handle_navigation(
         text, keyboard = fast1080_prompt(
             FAST1080_MAX_INPUT_MB,
             FAST1080_MAX_DURATION_SECONDS,
+        )
+    elif data == "menu:feature:photo":
+        context.user_data.pop("menu_mode", None)
+        context.user_data.pop("photo_preset", None)
+        text, keyboard = photo_ai_menu()
+    elif data.startswith("photo:preset:"):
+        preset = data.rsplit(":", 1)[-1]
+        mode_label = PHOTO_AI_MODES.get(preset)
+        if mode_label is None:
+            await _safe_answer_query(
+                query,
+                text="Acabado fotográfico desconocido.",
+                show_alert=True,
+            )
+            return
+        context.user_data["menu_mode"] = "photoai"
+        context.user_data["photo_preset"] = preset
+        text, keyboard = photo_ai_prompt(
+            mode_label,
+            PHOTO_AI_MAX_BATCH,
+            PHOTO_AI_MAX_INPUT_MB,
         )
     elif data.startswith("restore:preset:"):
         preset = data.rsplit(":", 1)[-1]
@@ -362,6 +432,7 @@ async def handle_navigation(
 async def _build_status_text(user_id: int) -> str:
     active, waiting = await DOWNLOAD_QUEUE.snapshot()
     fast_active, fast_waiting = await ENHANCEMENT_QUEUE.snapshot()
+    image_active, image_waiting = await IMAGE_QUEUE.snapshot()
     download_status = await DOWNLOAD_QUEUE.user_snapshot(user_id)
     fast_status = await ENHANCEMENT_QUEUE.user_snapshot(user_id)
 
@@ -407,6 +478,9 @@ async def _build_status_text(user_id: int) -> str:
         "Cola de mejoras:\n"
         f"• Activas: {fast_active}\n"
         f"• Esperando: {fast_waiting}\n\n"
+        "Cola Foto IA:\n"
+        f"• Activas: {image_active}\n"
+        f"• Esperando: {image_waiting}\n\n"
         f"{personal}"
     )
 
@@ -414,6 +488,7 @@ async def _build_status_text(user_id: int) -> str:
 async def _build_health_text() -> str:
     active, waiting = await DOWNLOAD_QUEUE.snapshot()
     fast_active, fast_waiting = await ENHANCEMENT_QUEUE.snapshot()
+    image_active, image_waiting = await IMAGE_QUEUE.snapshot()
     heartbeat = "activo" if HEARTBEAT_SERVICE.running else "detenido"
 
     return (
@@ -425,7 +500,10 @@ async def _build_health_text() -> str:
         f"Descargas esperando: {waiting}\n"
         f"Mejoras activas: {fast_active}\n"
         f"Mejoras esperando: {fast_waiting}\n"
+        f"Foto IA activas: {image_active}\n"
+        f"Foto IA esperando: {image_waiting}\n"
         f"FFmpeg Fast1080: {FAST1080_ENHANCER.availability_text()}\n\n"
+        f"Foto IA x2: {PHOTO_AI_ENHANCER.availability_text()}\n\n"
         f"Restauración integral: {VIDEO_RESTORER.availability_text()}\n\n"
         "El supervisor externo revisará el heartbeat cada 5 minutos."
     )
@@ -462,33 +540,104 @@ async def send_video(
     if result.file_size > MAX_TELEGRAM_FILE_SIZE:
         return False
 
-    details = format_result_details(
-        result,
-        heading="✅ Procesado por MediaLab",
-    )
-
-    with video_path.open("rb") as video:
-        send_options = {
-            "video": video,
-            "caption": details,
-            "supports_streaming": True,
-            "read_timeout": SEND_TIMEOUT,
-            "write_timeout": SEND_TIMEOUT,
-            "connect_timeout": 60,
-            "pool_timeout": 60,
-        }
-        if reply_to_message:
-            await message.reply_video(**send_options)
-        else:
-            await message.get_bot().send_video(
-                chat_id=message.chat_id,
-                **send_options,
+    details = _format_video_delivery_details(result)
+    bot = message.get_bot()
+    async with TELEGRAM_UPLOAD_LOCK:
+        details_message = await bot.send_message(
+            chat_id=message.chat_id,
+            text=details,
+        )
+        try:
+            with video_path.open("rb") as video:
+                send_options = {
+                    "video": video,
+                    "supports_streaming": True,
+                    "read_timeout": SEND_TIMEOUT,
+                    "write_timeout": SEND_TIMEOUT,
+                    "connect_timeout": 60,
+                    "pool_timeout": 60,
+                }
+                if reply_to_message:
+                    await message.reply_video(**send_options)
+                else:
+                    await bot.send_video(
+                        chat_id=message.chat_id,
+                        **send_options,
+                    )
+        finally:
+            asyncio.create_task(
+                _delete_message_later(details_message, 5.0),
+                name=f"delete-video-details-{details_message.message_id}",
             )
 
     return True
 
 
+async def send_audio(
+    message: Message,
+    result: AudioDownloadResult,
+) -> bool:
+    """Envía la pista como audio de Telegram y no como documento genérico."""
+    audio_path = result.file_path
+    if audio_path is None or not audio_path.is_file():
+        raise FileNotFoundError(f"No se encontró el MP3: {audio_path}")
+
+    result.file_size = audio_path.stat().st_size
+    if result.file_size > MAX_TELEGRAM_FILE_SIZE:
+        return False
+
+    details = (
+        "✅ MP3 listo\n"
+        f"🌐 Plataforma: {result.platform.title()}\n"
+        f"⚙️ Motor: {result.engine}\n"
+        f"📦 Tamaño: {format_file_size(result.file_size)}"
+    )
+    bot = message.get_bot()
+    async with TELEGRAM_UPLOAD_LOCK:
+        details_message = await bot.send_message(
+            chat_id=message.chat_id,
+            text=details,
+        )
+        try:
+            with audio_path.open("rb") as audio:
+                await bot.send_audio(
+                    chat_id=message.chat_id,
+                    audio=audio,
+                    title=result.title[:64] or "Audio",
+                    performer=result.author[:64] or None,
+                    duration=max(0, int(result.duration or 0)) or None,
+                    filename=audio_path.name,
+                    read_timeout=SEND_TIMEOUT,
+                    write_timeout=SEND_TIMEOUT,
+                    connect_timeout=60,
+                    pool_timeout=60,
+                )
+        finally:
+            asyncio.create_task(
+                _delete_message_later(details_message, 5.0),
+                name=f"delete-audio-details-{details_message.message_id}",
+            )
+    return True
+
+
+def _format_video_delivery_details(result: DownloadResult) -> str:
+    return (
+        "✅ Listo\n"
+        f"⚙️ Motor: {result.engine or 'No disponible'}\n"
+        f"📦 Tamaño: {format_file_size(max(result.file_size, 0))}\n"
+        f"📐 Resolución: {format_resolution(result.width, result.height)}"
+    )
+
+
 async def send_photo_album(
+    message: Message,
+    result: PhotoDownloadResult,
+) -> bool:
+    async with TELEGRAM_UPLOAD_LOCK:
+        return await _send_photo_album_unlocked(message, result)
+
+
+async def _send_photo_album_unlocked(
     message: Message,
     result: PhotoDownloadResult,
 ) -> bool:
@@ -568,6 +717,14 @@ async def send_instagram_media(
     message: Message,
     result: InstagramDownloadResult,
 ) -> bool:
+    async with TELEGRAM_UPLOAD_LOCK:
+        return await _send_instagram_media_unlocked(message, result)
+
+
+async def _send_instagram_media_unlocked(
+    message: Message,
+    result: InstagramDownloadResult,
+) -> bool:
     """Envía Instagram como originales o como álbum visual configurable."""
     files = [path for path in result.files if path.is_file()]
     if not files:
@@ -576,18 +733,44 @@ async def send_instagram_media(
     if any(path.stat().st_size > MAX_TELEGRAM_FILE_SIZE for path in files):
         return False
 
-    caption = _format_instagram_details(result)
+    video_files = [
+        path for path in files if path.suffix.lower() in _VIDEO_EXTENSIONS
+    ]
+    details_message: Message | None = None
+    caption: str | None = _format_instagram_details(result)
+    if video_files:
+        width, height = probe_video_resolution(video_files[0])
+        details_message = await message.get_bot().send_message(
+            chat_id=message.chat_id,
+            text=_format_video_delivery_details(
+                DownloadResult(
+                    success=True,
+                    message="Listo",
+                    engine=result.engine,
+                    file_size=result.total_size,
+                    width=width,
+                    height=height,
+                )
+            ),
+        )
+        caption = None
 
-    if INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS:
-        return await _send_files_as_documents(message, files, caption)
-
-    return await _send_files_as_visual_media(message, files, caption)
+    try:
+        if INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS:
+            return await _send_files_as_documents(message, files, caption)
+        return await _send_files_as_visual_media(message, files, caption)
+    finally:
+        if details_message is not None:
+            asyncio.create_task(
+                _delete_message_later(details_message, 5.0),
+                name=f"delete-video-details-{details_message.message_id}",
+            )
 
 
 async def _send_files_as_documents(
     message: Message,
     files: list[Path],
-    caption: str,
+    caption: str | None,
 ) -> bool:
     if len(files) == 1:
         with files[0].open("rb") as document:
@@ -642,7 +825,7 @@ async def _send_files_as_documents(
 async def _send_files_as_visual_media(
     message: Message,
     files: list[Path],
-    caption: str,
+    caption: str | None,
 ) -> bool:
     if any(
         path.suffix.lower() in _IMAGE_EXTENSIONS
@@ -773,6 +956,15 @@ async def handle_media(
         return
 
     media_mode = context.user_data.get("menu_mode")
+    if media_mode == "photoai":
+        await _handle_photo_ai_media(
+            context=context,
+            message=message,
+            user_id=user.id,
+            mode=str(context.user_data.get("photo_preset") or "detail"),
+        )
+        return
+
     if media_mode == "restorevideo":
         accepted = await _handle_restore_media(
             context=context,
@@ -785,6 +977,12 @@ async def handle_media(
         return
 
     if media_mode != "fast1080":
+        if _extract_received_image(message) is not None:
+            await message.reply_text(
+                "ℹ️ Recibí una imagen, pero Foto IA x2 no está seleccionada.\n\n"
+                "Abre /menu → ✨ Mejorar contenido → 🖼️ Foto IA x2."
+            )
+            return
         await message.reply_text(
             "ℹ️ Recibí un video, pero no hay una mejora seleccionada.\n\n"
             "Abre /menu → ✨ Mejorar contenido → ⚡ Super rápido 1080."
@@ -845,6 +1043,293 @@ async def handle_media(
     )
     if receipt.accepted:
         context.user_data.pop("menu_mode", None)
+
+
+async def _handle_photo_ai_media(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    message: Message,
+    user_id: int,
+    mode: str,
+) -> None:
+    image = _extract_received_image(message)
+    if image is None:
+        await message.reply_text(
+            "❌ Foto IA x2 acepta fotografías o archivos de imagen."
+        )
+        return
+    if image.file_size > PHOTO_AI_MAX_INPUT_BYTES:
+        await message.reply_text(
+            "⚠️ Esa imagen supera el límite de Foto IA x2.\n\n"
+            f"📦 Máximo por imagen: {PHOTO_AI_MAX_INPUT_MB} MB\n"
+            f"📄 Recibido: {format_file_size(image.file_size)}"
+        )
+        return
+
+    media_group_id = str(message.media_group_id or "")
+    if not media_group_id:
+        context.user_data.pop("menu_mode", None)
+        context.user_data.pop("photo_preset", None)
+        await _enqueue_photo_ai_batch(
+            user_id=user_id,
+            source_message=message,
+            batch_id=image.file_unique_id,
+            images=[image],
+            mode=mode,
+        )
+        return
+
+    batches = context.user_data.setdefault(_PHOTO_BATCHES_KEY, {})
+    batch = batches.get(media_group_id)
+    if not isinstance(batch, dict):
+        batch = {
+            "items": [],
+            "source_message": message,
+            "task": None,
+            "mode": mode,
+        }
+        batches[media_group_id] = batch
+
+    items = batch["items"]
+    if all(item.file_unique_id != image.file_unique_id for item in items):
+        if len(items) >= PHOTO_AI_MAX_BATCH:
+            await message.reply_text(
+                f"⚠️ Foto IA x2 acepta hasta {PHOTO_AI_MAX_BATCH} imágenes por lote."
+            )
+            return
+        items.append(image)
+
+    previous_task = batch.get("task")
+    if isinstance(previous_task, asyncio.Task):
+        previous_task.cancel()
+    batch["task"] = asyncio.create_task(
+        _finalize_photo_ai_group(
+            context=context,
+            user_id=user_id,
+            media_group_id=media_group_id,
+        ),
+        name=f"photo-ai-group-{user_id}-{media_group_id}",
+    )
+
+
+async def _finalize_photo_ai_group(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    media_group_id: str,
+) -> None:
+    try:
+        await asyncio.sleep(_PHOTO_BATCH_SETTLE_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    batches = context.user_data.get(_PHOTO_BATCHES_KEY)
+    if not isinstance(batches, dict):
+        return
+    batch = batches.pop(media_group_id, None)
+    if not isinstance(batch, dict):
+        return
+    if not batches:
+        context.user_data.pop(_PHOTO_BATCHES_KEY, None)
+    context.user_data.pop("menu_mode", None)
+    context.user_data.pop("photo_preset", None)
+
+    source_message = batch.get("source_message")
+    images = batch.get("items")
+    mode = str(batch.get("mode") or "detail")
+    if not isinstance(source_message, Message) or not isinstance(images, list):
+        return
+    await _enqueue_photo_ai_batch(
+        user_id=user_id,
+        source_message=source_message,
+        batch_id=media_group_id,
+        images=images[:PHOTO_AI_MAX_BATCH],
+        mode=mode,
+    )
+
+
+def _extract_received_image(message: Message) -> ReceivedImage | None:
+    if message.photo:
+        photo = message.photo[-1]
+        return ReceivedImage(
+            file_id=str(photo.file_id),
+            file_unique_id=str(photo.file_unique_id),
+            file_name=f"{photo.file_unique_id}.jpg",
+            file_size=int(photo.file_size or 0),
+        )
+
+    document = message.document
+    if document is None:
+        return None
+    mime_type = str(document.mime_type or "").lower()
+    suffix = Path(document.file_name or "").suffix.lower()
+    if not mime_type.startswith("image/") and suffix not in _IMAGE_EXTENSIONS:
+        return None
+    return ReceivedImage(
+        file_id=str(document.file_id),
+        file_unique_id=str(document.file_unique_id),
+        file_name=str(document.file_name or f"{document.file_unique_id}.jpg"),
+        file_size=int(document.file_size or 0),
+    )
+
+
+async def _enqueue_photo_ai_batch(
+    *,
+    user_id: int,
+    source_message: Message,
+    batch_id: str,
+    images: list[ReceivedImage],
+    mode: str,
+) -> None:
+    mode_label = PHOTO_AI_MODES.get(mode, PHOTO_AI_MODES["detail"])
+    status_message = await source_message.reply_text(
+        "⏳ Registrando lote en la cola Foto IA x2…\n\n"
+        f"🎨 Acabado: {mode_label}"
+    )
+
+    async def runner() -> None:
+        await _process_photo_ai_batch_job(
+            user_id=user_id,
+            source_message=source_message,
+            status_message=status_message,
+            batch_id=batch_id,
+            images=images,
+            mode=mode,
+        )
+
+    job = ImageBatchJob(
+        key=f"photoai:{user_id}:{batch_id}",
+        user_id=user_id,
+        source=batch_id,
+        image_count=len(images),
+        mode_label=mode_label,
+        status_message=status_message,
+        runner=runner,
+    )
+    receipt = await IMAGE_QUEUE.enqueue(job)
+    if receipt.accepted:
+        if receipt.position > 0:
+            await _safe_edit(
+                status_message,
+                "🕒 Lote añadido a la cola Foto IA x2.\n\n"
+                f"📍 Posición: {receipt.position}\n"
+                f"🖼️ Imágenes: {len(images)}\n"
+                f"🎨 Acabado: {mode_label}",
+            )
+        return
+
+    messages = {
+        "duplicate": "ℹ️ Este lote ya se está procesando.",
+        "user_limit": "🕒 Ya tienes un lote Foto IA activo o esperando.",
+        "full": "⚠️ La cola Foto IA está llena en este momento.",
+        "unavailable": "❌ La cola Foto IA todavía no está disponible.",
+    }
+    await _safe_edit(
+        status_message,
+        messages.get(receipt.reason, "❌ No se pudo registrar el lote."),
+    )
+
+
+async def _process_photo_ai_batch_job(
+    *,
+    user_id: int,
+    source_message: Message,
+    status_message: Message,
+    batch_id: str,
+    images: list[ReceivedImage],
+    mode: str,
+) -> None:
+    workspace = PHOTO_AI_ENHANCER.create_workspace(user_id, batch_id)
+    input_folder = workspace / "input"
+    output_folder = workspace / "output"
+    input_folder.mkdir(parents=True, exist_ok=True)
+    input_paths: list[Path] = []
+
+    try:
+        bot = source_message.get_bot()
+        for index, image in enumerate(images, start=1):
+            suffix = Path(image.file_name).suffix.lower()
+            if suffix not in _IMAGE_EXTENSIONS:
+                suffix = ".jpg"
+            input_path = input_folder / f"entrada_{index:02d}{suffix}"
+            telegram_file = await bot.get_file(image.file_id)
+            await telegram_file.download_to_drive(custom_path=input_path)
+            input_paths.append(input_path)
+    except Exception:
+        logger.exception("No se pudo descargar el lote Foto IA desde Telegram.")
+        delete_sent_files(input_paths)
+        await _safe_edit(
+            status_message,
+            "❌ No se pudieron recibir todas las imágenes del lote.",
+        )
+        return
+
+    result = await PHOTO_AI_ENHANCER.process_batch_async(
+        input_paths,
+        output_folder,
+        mode,
+    )
+    if not result.success:
+        if result.error:
+            logger.error("Foto IA x2 falló: %s", result.error)
+        delete_sent_files([*input_paths, *result.output_paths])
+        await _safe_edit(status_message, f"❌ {result.message}")
+        return
+
+    await _safe_edit(
+        status_message,
+        "✅ Listo\n"
+        f"🖼️ Imágenes: {len(result.output_paths)}\n"
+        f"⚙️ Motor: {result.provider}",
+    )
+    try:
+        await _send_photo_ai_outputs(source_message, result.output_paths)
+    except Exception:
+        logger.exception("Telegram no pudo enviar el lote Foto IA.")
+        await _safe_edit(
+            status_message,
+            "❌ Las imágenes se mejoraron, pero Telegram no pudo enviarlas.",
+        )
+        delete_sent_files([*input_paths, *result.output_paths])
+        return
+
+    asyncio.create_task(
+        _delete_message_later(status_message, 5.0),
+        name=f"delete-photo-ai-status-{status_message.message_id}",
+    )
+    delete_sent_files([*input_paths, *result.output_paths])
+
+
+async def _send_photo_ai_outputs(
+    message: Message,
+    output_paths: list[Path],
+) -> None:
+    if not output_paths:
+        raise FileNotFoundError("Foto IA no produjo archivos de salida.")
+    async with TELEGRAM_UPLOAD_LOCK:
+        if len(output_paths) == 1:
+            with output_paths[0].open("rb") as photo:
+                await message.reply_photo(
+                    photo=photo,
+                    read_timeout=SEND_TIMEOUT,
+                    write_timeout=SEND_TIMEOUT,
+                    connect_timeout=60,
+                    pool_timeout=60,
+                )
+            return
+
+        with ExitStack() as stack:
+            media = [
+                InputMediaPhoto(media=stack.enter_context(path.open("rb")))
+                for path in output_paths[:PHOTO_AI_MAX_BATCH]
+            ]
+            await message.reply_media_group(
+                media=media,
+                read_timeout=SEND_TIMEOUT,
+                write_timeout=SEND_TIMEOUT,
+                connect_timeout=60,
+                pool_timeout=60,
+            )
 
 
 def _extract_received_video(message: Message) -> Any | None:
@@ -1079,10 +1564,7 @@ async def _process_fast1080_job(
         return
 
     delete_sent_files([input_path, output_path])
-    await _complete_and_remove_status(
-        status_message,
-        "✅ Video mejorado y enviado correctamente.",
-    )
+    await _delete_message_later(status_message, 0.0)
 
 
 async def _handle_restore_media(
@@ -1462,10 +1944,7 @@ async def _process_restore_job(
         return
 
     delete_sent_files([input_path, output_path])
-    await _complete_and_remove_status(
-        status_message,
-        "✅ Video restaurado y enviado correctamente.",
-    )
+    await _delete_message_later(status_message, 0.0)
 
 
 async def handle_link(
@@ -1490,6 +1969,43 @@ async def handle_link(
 
     platform = detect_platform(url)
 
+    if context.user_data.get("menu_mode") == "audio":
+        if platform == "tiktok":
+            url = await resolve_tiktok_url(url)
+        elif platform == "instagram":
+            resolved_url = await resolve_instagram_url(url)
+            normalized_url = normalize_instagram_url(resolved_url)
+            if normalized_url is None or not is_instagram_single_media_url(
+                normalized_url
+            ):
+                await message.reply_text(
+                    "❌ Para MP3 de Instagram envía un Reel, post o video "
+                    "individual público."
+                )
+                return
+            url = normalized_url
+        elif platform != "youtube":
+            await message.reply_text(
+                "❌ El modo MP3 acepta enlaces de YouTube o TikTok.\n\n"
+                "Instagram se intenta solo para Reels públicos individuales."
+            )
+            return
+
+        status_message = await message.reply_text(
+            "🎵 Registrando extracción MP3…\n\n"
+            "El audio se descargará y convertirá antes de enviarse a Telegram."
+        )
+        receipt = await _enqueue_audio(
+            user_id=user.id,
+            source_message=message,
+            status_message=status_message,
+            url=url,
+            platform=platform or "",
+        )
+        if receipt.accepted:
+            context.user_data.pop("menu_mode", None)
+        return
+
     if platform == "tiktok":
         resolved_url = await resolve_tiktok_url(url)
 
@@ -1506,29 +2022,23 @@ async def handle_link(
             return
 
         request_id = _store_pending_tiktok_url(context, resolved_url)
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "🌐 TikWM Original",
-                        callback_data=(
-                            f"{_CALLBACK_PREFIX}:{request_id}:tikwm"
-                        ),
-                    ),
-                    InlineKeyboardButton(
-                        "🛠️ yt-dlp",
-                        callback_data=(
-                            f"{_CALLBACK_PREFIX}:{request_id}:ytdlp"
-                        ),
-                    ),
-                ]
-            ]
-        )
+        request_data = _pending_requests(context)[request_id]
+        request_data["state"] = "tikwm_running"
 
-        await message.reply_text(
+        status_message = await message.reply_text(
             "🎬 Video de TikTok detectado.\n\n"
-            "Selecciona el motor de descarga:",
-            reply_markup=keyboard,
+            "✅ TikWM Original está preseleccionado e iniciará automáticamente.\n"
+            "🛠️ yt-dlp se ofrecerá si TikWM no puede descargarlo.",
+            reply_markup=_default_tiktok_engine_keyboard(request_id),
+        )
+        await _enqueue_tiktok_video(
+            user_id=user.id,
+            source_message=message,
+            status_message=status_message,
+            url=resolved_url,
+            engine=TIKTOK_ENGINES["tikwm"],
+            fallback_request_id=request_id,
+            fallback_request_data=request_data,
         )
         return
 
@@ -1562,7 +2072,8 @@ async def handle_link(
 
     await message.reply_text(
         "❌ Plataforma aún no soportada.\n\n"
-        "Actualmente puedes enviar enlaces de TikTok e Instagram."
+        "Actualmente puedes descargar video de TikTok e Instagram, o usar "
+        "🎵 Extraer MP3 para YouTube y TikTok."
     )
 
 
@@ -1592,7 +2103,7 @@ async def handle_tiktok_engine_selection(
 
     request_id, engine_key = parsed
     pending = _pending_requests(context)
-    request_data = pending.pop(request_id, None)
+    request_data = pending.get(request_id)
 
     if request_data is None:
         await query.edit_message_text(
@@ -1600,6 +2111,14 @@ async def handle_tiktok_engine_selection(
             "Envía nuevamente el enlace de TikTok."
         )
         return
+
+    if request_data.get("state") != "fallback_ready":
+        return
+
+    if engine_key != "ytdlp":
+        return
+
+    pending.pop(request_id, None)
 
     created_at = float(request_data.get("created_at") or 0)
     if time.time() - created_at > ENGINE_SELECTION_TTL:
@@ -1646,6 +2165,8 @@ async def _enqueue_tiktok_video(
     status_message: Message,
     url: str,
     engine: Any,
+    fallback_request_id: str | None = None,
+    fallback_request_data: dict[str, Any] | None = None,
 ) -> None:
     async def runner() -> None:
         await _process_tiktok_video_job(
@@ -1653,6 +2174,8 @@ async def _enqueue_tiktok_video(
             status_message=status_message,
             url=url,
             engine=engine,
+            fallback_request_id=fallback_request_id,
+            fallback_request_data=fallback_request_data,
         )
 
     job = DownloadJob(
@@ -1729,6 +2252,41 @@ async def _enqueue_instagram(
     await _announce_queue_receipt(status_message, receipt, "gallery-dl")
 
 
+async def _enqueue_audio(
+    *,
+    user_id: int,
+    source_message: Message,
+    status_message: Message,
+    url: str,
+    platform: str,
+) -> QueueReceipt:
+    async def runner() -> None:
+        await _process_audio_job(
+            source_message=source_message,
+            status_message=status_message,
+            url=url,
+        )
+
+    job = DownloadJob(
+        key=f"audio:{_job_key(user_id, url)}",
+        user_id=user_id,
+        url=url,
+        platform=platform,
+        label="yt-dlp · MP3 192 kbps",
+        status_message=status_message,
+        started_text=(
+            "🎵 Extrayendo audio MP3…\n\n"
+            f"🌐 Plataforma: {platform.title()}\n"
+            "📍 Estado: descargando la mejor pista de audio\n\n"
+            "⏳ Después se convertirá a MP3 y se enviará por Telegram."
+        ),
+        runner=runner,
+    )
+    receipt = await DOWNLOAD_QUEUE.enqueue(job)
+    await _announce_queue_receipt(status_message, receipt, "yt-dlp · MP3")
+    return receipt
+
+
 async def _announce_queue_receipt(
     status_message: Message,
     receipt: QueueReceipt,
@@ -1752,7 +2310,7 @@ async def _announce_queue_receipt(
             "No necesitas enviarlo nuevamente."
         ),
         "user_limit": (
-            "🕒 Ya tienes una solicitud activa o en espera.\n\n"
+            "🕒 Ya alcanzaste tu límite de solicitudes activas o en espera.\n\n"
             "Cuando termine podrás enviar otra."
         ),
         "full": (
@@ -1778,18 +2336,77 @@ async def _announce_queue_receipt(
 # ==========================================================
 
 
+async def _process_audio_job(
+    *,
+    source_message: Message,
+    status_message: Message,
+    url: str,
+) -> None:
+    result = await AUDIO_EXTRACTOR.download_async(url)
+    if not result.success or result.file_path is None:
+        if result.error:
+            logger.error("Extracción MP3 falló: %s", result.error)
+        await _safe_edit(status_message, f"❌ {result.message}")
+        return
+
+    await _safe_edit(
+        status_message,
+        "📤 Enviando MP3 a Telegram…\n\n"
+        f"🎵 {result.title or 'Audio'}\n"
+        f"📦 Tamaño: {format_file_size(result.file_size)}",
+    )
+    try:
+        sent = await send_audio(source_message, result)
+    except Exception:
+        logger.exception("Telegram no pudo enviar el MP3.")
+        await _safe_edit(
+            status_message,
+            "❌ El MP3 se preparó, pero Telegram no pudo enviarlo.",
+        )
+        return
+
+    if not sent:
+        await _safe_edit(
+            status_message,
+            "⚠️ El MP3 supera el límite de 50 MB de Telegram.\n\n"
+            "Prueba con un video más corto.",
+        )
+        return
+
+    if not delete_sent_file(result.file_path):
+        logger.warning("No se pudo borrar el MP3 temporal: %s", result.file_path)
+    await _delete_message_later(status_message, 0.0)
+
+
 async def _process_tiktok_video_job(
     *,
     source_message: Message,
     status_message: Message,
     url: str,
     engine: Any,
+    fallback_request_id: str | None = None,
+    fallback_request_data: dict[str, Any] | None = None,
 ) -> None:
     result = await engine.download_async(url)
 
     if not result.success or result.file_path is None:
         if result.error:
             logger.error("Error del motor %s: %s", engine.name, result.error)
+        if (
+            engine is TIKTOK_ENGINES["tikwm"]
+            and fallback_request_id is not None
+            and fallback_request_data is not None
+        ):
+            fallback_request_data["state"] = "fallback_ready"
+            fallback_request_data["created_at"] = time.time()
+            await _safe_edit(
+                status_message,
+                "⚠️ TikWM Original no pudo descargar este video.\n\n"
+                "Puedes intentar el motor de respaldo yt-dlp:",
+                reply_markup=_tiktok_ytdlp_fallback_keyboard(fallback_request_id),
+            )
+            return
+
         await _safe_edit(
             status_message,
             f"❌ {result.message}\n\n"
@@ -1839,7 +2456,7 @@ async def _process_tiktok_video_job(
             await _safe_edit(
                 status_message,
                 "⚠️ El video original supera el límite de envío de Telegram.\n\n"
-                f"{format_result_details(result)}\n\n"
+                f"{_format_video_delivery_details(result)}\n\n"
                 "Pulsa el botón para descargar el archivo original directamente "
                 "desde TikWM. El enlace es temporal; ábrelo lo antes posible.",
                 reply_markup=keyboard,
@@ -1854,7 +2471,7 @@ async def _process_tiktok_video_job(
             status_message,
             "⚠️ El video fue descargado, pero supera el límite configurado "
             "para Telegram.\n\n"
-            f"{format_result_details(result)}",
+            f"{_format_video_delivery_details(result)}",
         )
         return
 
@@ -1864,10 +2481,7 @@ async def _process_tiktok_video_job(
             result.file_path,
         )
 
-    await _complete_and_remove_status(
-        status_message,
-        "✅ Video enviado correctamente.",
-    )
+    await _delete_message_later(status_message, 0.0)
 
 
 async def _process_tiktok_photo_job(
@@ -2014,10 +2628,13 @@ async def _process_instagram_job(
         return
 
     delete_sent_files(result.files)
-    await _complete_and_remove_status(
-        status_message,
-        "✅ Contenido de Instagram enviado correctamente.",
-    )
+    if any(path.suffix.lower() in _VIDEO_EXTENSIONS for path in result.files):
+        await _delete_message_later(status_message, 0.0)
+    else:
+        await _complete_and_remove_status(
+            status_message,
+            "✅ Contenido de Instagram enviado correctamente.",
+        )
 
 
 # ==========================================================
@@ -2170,11 +2787,21 @@ async def _complete_and_remove_status(
 
 
 async def _delete_status_later(status_message: Message) -> None:
-    if STATUS_MESSAGE_DELETE_DELAY > 0:
-        await asyncio.sleep(STATUS_MESSAGE_DELETE_DELAY)
+    await _delete_message_later(
+        status_message,
+        STATUS_MESSAGE_DELETE_DELAY,
+    )
+
+
+async def _delete_message_later(
+    message: Message,
+    delay_seconds: float,
+) -> None:
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
 
     try:
-        await status_message.delete()
+        await message.delete()
     except TelegramError as error:
         logger.debug("No se pudo eliminar el mensaje temporal: %s", error)
 
@@ -2196,6 +2823,36 @@ def _store_pending_tiktok_url(
         "created_at": time.time(),
     }
     return request_id
+
+
+def _default_tiktok_engine_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ TikWM Original",
+                    callback_data=f"{_CALLBACK_PREFIX}:{request_id}:tikwm",
+                ),
+                InlineKeyboardButton(
+                    "🛠️ yt-dlp",
+                    callback_data=f"{_CALLBACK_PREFIX}:{request_id}:ytdlp",
+                ),
+            ]
+        ]
+    )
+
+
+def _tiktok_ytdlp_fallback_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🛠️ Probar con yt-dlp",
+                    callback_data=f"{_CALLBACK_PREFIX}:{request_id}:ytdlp",
+                )
+            ]
+        ]
+    )
 
 
 def _pending_requests(

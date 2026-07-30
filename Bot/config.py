@@ -80,6 +80,8 @@ CACHE_FOLDER = BOT_FOLDER / "cache"
 STATE_FOLDER = BOT_FOLDER / "state"
 FAST1080_FOLDER = TEMP_FOLDER / "Fast1080"
 RESTORE_FOLDER = TEMP_FOLDER / "RestoreHD"
+PHOTO_AI_FOLDER = TEMP_FOLDER / "PhotoAI"
+AUDIO_DOWNLOADS = DOWNLOADS_FOLDER / "Audio"
 MODEL_FOLDER = BOT_FOLDER / "models"
 TOOLS_FOLDER = ROOT / "Tools"
 RESTORE_AI_MODEL_FOLDER = TOOLS_FOLDER / "Models"
@@ -127,7 +129,10 @@ DOWNLOAD_QUEUE_WORKERS = _read_int_env(
     "DOWNLOAD_QUEUE_WORKERS", 1, minimum=1, maximum=4
 )
 MAX_JOBS_PER_USER = _read_int_env(
-    "MAX_JOBS_PER_USER", 1, minimum=1, maximum=10
+    "MAX_JOBS_PER_USER", 3, minimum=1, maximum=10
+)
+AUDIO_MAX_DURATION_SECONDS = _read_int_env(
+    "AUDIO_MAX_DURATION_SECONDS", 30 * 60, minimum=60, maximum=4 * 60 * 60
 )
 
 FAST_QUEUE_MAX_SIZE = _read_int_env(
@@ -138,6 +143,23 @@ FAST_QUEUE_WORKERS = _read_int_env(
 )
 FAST_MAX_JOBS_PER_USER = _read_int_env(
     "FAST_MAX_JOBS_PER_USER", 1, minimum=1, maximum=3
+)
+PHOTO_QUEUE_MAX_SIZE = _read_int_env(
+    "PHOTO_QUEUE_MAX_SIZE", 5, minimum=1, maximum=20
+)
+PHOTO_QUEUE_WORKERS = _read_int_env(
+    "PHOTO_QUEUE_WORKERS", 1, minimum=1, maximum=1
+)
+PHOTO_MAX_JOBS_PER_USER = _read_int_env(
+    "PHOTO_MAX_JOBS_PER_USER", 1, minimum=1, maximum=3
+)
+PHOTO_AI_MAX_BATCH = 10
+PHOTO_AI_MAX_INPUT_MB = _read_int_env(
+    "PHOTO_AI_MAX_INPUT_MB", 10, minimum=1, maximum=20
+)
+PHOTO_AI_MAX_INPUT_BYTES = PHOTO_AI_MAX_INPUT_MB * 1024 * 1024
+PHOTO_AI_MAX_DIMENSION = _read_int_env(
+    "PHOTO_AI_MAX_DIMENSION", 4096, minimum=1024, maximum=8192
 )
 FAST1080_MAX_INPUT_MB = _read_int_env(
     "FAST1080_MAX_INPUT_MB", 20, minimum=1, maximum=20

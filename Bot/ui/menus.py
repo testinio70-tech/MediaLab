@@ -9,10 +9,15 @@ def main_menu(
     privileged: bool,
 ) -> tuple[str, InlineKeyboardMarkup]:
     rows = [
-        [InlineKeyboardButton("📥 Descargar contenido", callback_data="menu:download")],
-        [InlineKeyboardButton("✨ Mejorar contenido", callback_data="menu:enhance")],
-        [InlineKeyboardButton("📊 Estado de mis trabajos", callback_data="menu:status")],
-        [InlineKeyboardButton("❓ Ayuda", callback_data="menu:help")],
+        [
+            InlineKeyboardButton("📥 Descargar video", callback_data="menu:download"),
+            InlineKeyboardButton("🎵 Extraer MP3", callback_data="menu:audio"),
+        ],
+        [InlineKeyboardButton("✨ Mejorar video o fotos", callback_data="menu:enhance")],
+        [
+            InlineKeyboardButton("📊 Mis trabajos", callback_data="menu:status"),
+            InlineKeyboardButton("❓ Ayuda", callback_data="menu:help"),
+        ],
     ]
     if privileged:
         rows.append(
@@ -20,9 +25,10 @@ def main_menu(
         )
 
     text = (
-        f"🎬 MediaLab {version}\n\n"
-        "Descarga y mejora contenido multimedia desde Telegram.\n\n"
-        "Selecciona una opción:"
+        f"🎬 MediaLab {version}\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "Tu espacio para descargar, convertir y mejorar contenido.\n\n"
+        "Elige una herramienta:"
     )
     return text, InlineKeyboardMarkup(rows)
 
@@ -33,6 +39,7 @@ def download_menu() -> tuple[str, InlineKeyboardMarkup]:
         "Envíame directamente un enlace compatible.\n\n"
         "• TikTok: videos y carruseles de fotos\n"
         "• Instagram: Posts, Reels y carruseles individuales\n\n"
+        "Para recibir solo audio, usa el botón 🎵 Extraer MP3.\n\n"
         "Las solicitudes se procesan mediante una cola para proteger la PC."
     )
     keyboard = InlineKeyboardMarkup(
@@ -47,8 +54,8 @@ def download_menu() -> tuple[str, InlineKeyboardMarkup]:
 def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "✨ Mejorar contenido\n\n"
-        "⚡ Super rápido 1080 ya está disponible con una cola separada.\n"
-        "Las herramientas de IA continuarán integrándose progresivamente.\n\n"
+        "🖼️ Foto IA x2 procesa lotes de hasta 10 imágenes en una cola propia.\n"
+        "⚡ Super rápido 1080 usa una cola separada para videos.\n\n"
         "Selecciona una opción:"
     )
     keyboard = InlineKeyboardMarkup(
@@ -78,6 +85,28 @@ def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
                 )
             ],
             [InlineKeyboardButton("↩️ Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
+def audio_prompt() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🎵 Extraer MP3\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "Envíame un enlace de YouTube o TikTok y recibirás únicamente "
+        "el audio en MP3 de alta calidad.\n\n"
+        "• YouTube: videos públicos individuales\n"
+        "• TikTok: videos públicos\n"
+        "• Instagram: intento de compatibilidad para Reels públicos\n\n"
+        "⏳ El MP3 se descarga y convierte en la cola normal. Puede tardar "
+        "más que un enlace directo; te avisaré en cada etapa.\n"
+        "📦 Límite: 30 minutos por archivo."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("↩️ Descargas", callback_data="menu:download")],
+            [InlineKeyboardButton("🏠 Menú principal", callback_data="menu:main")],
         ]
     )
     return text, keyboard
@@ -197,12 +226,75 @@ def fast1080_prompt(
     return text, keyboard
 
 
+def photo_ai_prompt(
+    mode_label: str,
+    max_batch: int,
+    max_input_mb: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"🖼️ Foto IA x2 · {mode_label}\n\n"
+        f"Envíame de 1 a {max_batch} imágenes. Para un lote, selecciónalas "
+        "juntas como álbum antes de enviarlas.\n\n"
+        "MediaLab aplicará restauración local 2×, protegerá rostros y "
+        "personas, y devolverá todas las imágenes en un solo álbum.\n\n"
+        f"📦 Máximo por imagen: {max_input_mb} MB\n"
+        "⚙️ Cola: exclusiva para imágenes\n"
+        "🧠 Procesamiento: un lote a la vez para proteger DirectML\n"
+        "🔒 Servicio local y gratuito; las fotos no se envían a terceros."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "↩️ Elegir otro acabado",
+                    callback_data="menu:feature:photo",
+                )
+            ],
+            [InlineKeyboardButton("🏠 Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
+def photo_ai_menu() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🖼️ Foto IA x2\n\n"
+        "Las dos opciones son gratuitas, locales y aceptan lotes de hasta "
+        "10 imágenes.\n\n"
+        "🌿 Restauración fiel x2\n"
+        "Amplía, limpia y enfoca con una mezcla conservadora que mantiene "
+        "el aspecto original.\n\n"
+        "🧠 Detalle IA local x2\n"
+        "Refuerza cabello, ropa y texturas con el acabado más cercano a la "
+        "referencia, protegiendo especialmente el rostro.\n\n"
+        "Selecciona el acabado:"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🌿 Restauración fiel x2",
+                    callback_data="photo:preset:faithful",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🧠 Detalle IA local x2 · recomendado",
+                    callback_data="photo:preset:detail",
+                )
+            ],
+            [InlineKeyboardButton("↩️ Mejoras", callback_data="menu:enhance")],
+            [InlineKeyboardButton("🏠 Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
 def feature_menu(feature: str) -> tuple[str, InlineKeyboardMarkup]:
     texts = {
         "photo": (
             "🖼️ Foto IA x2\n\n"
-            "Duplicará las dimensiones y reconstruirá detalles con IA.\n\n"
-            "Estado: en preparación; todavía no disponible."
+            "Disponible desde el menú de mejoras para lotes de hasta 10 imágenes."
         ),
         "fast1080": (
             "⚡ Super rápido 1080\n\n"
@@ -249,11 +341,15 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
             "📥 Descargas\n\n"
             "TikTok:\n"
             "• Videos con TikWM Original o yt-dlp\n"
-            "• Carruseles fotográficos con gallery-dl\n\n"
+            "• Carruseles fotográficos con gallery-dl\n"
+            "• Audio MP3 desde videos públicos\n\n"
+            "YouTube:\n"
+            "• Audio MP3 desde videos públicos individuales\n\n"
             "Instagram:\n"
             "• Posts, Reels, videos /tv/ y carruseles individuales\n"
             "• Máxima calidad que Instagram exponga\n"
-            "• Algunos enlaces requieren cookies válidas"
+            "• Algunos enlaces requieren cookies válidas\n"
+            "• MP3 de Reels públicos: disponibilidad variable"
         ),
         "enhancements": (
             "✨ Mejoras\n\n"
@@ -292,6 +388,7 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
             "📋 Comandos\n\n"
             "/start — Abrir MediaLab\n"
             "/menu — Abrir el menú principal\n"
+            "/audio — Abrir la extracción MP3\n"
             "/restorevideo — Restaurar cada fotograma y retirar texto seguro\n"
             "/status — Ver el estado de tus trabajos\n"
             "/cancel — Cancelar selecciones pendientes\n"
