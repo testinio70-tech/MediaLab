@@ -16,6 +16,8 @@ from config import (
     HEARTBEAT_WRITE_INTERVAL_SECONDS,
 )
 from services.download_queue import DOWNLOAD_QUEUE
+from services.enhancement_queue import FAST_ENHANCEMENT_QUEUE
+from services.image_queue import IMAGE_QUEUE
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,8 @@ class HeartbeatService:
     async def _write(self, status: str) -> None:
         try:
             active, waiting = await DOWNLOAD_QUEUE.snapshot()
+            fast_active, fast_waiting = await FAST_ENHANCEMENT_QUEUE.snapshot()
+            image_active, image_waiting = await IMAGE_QUEUE.snapshot()
             payload: dict[str, Any] = {
                 "status": status,
                 "version": APP_VERSION,
@@ -75,6 +79,14 @@ class HeartbeatService:
                 "download_queue": {
                     "active": active,
                     "waiting": waiting,
+                },
+                "fast_enhancement_queue": {
+                    "active": fast_active,
+                    "waiting": fast_waiting,
+                },
+                "image_enhancement_queue": {
+                    "active": image_active,
+                    "waiting": image_waiting,
                 },
             }
             await asyncio.to_thread(_write_json_atomic, self.path, payload)

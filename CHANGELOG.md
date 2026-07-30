@@ -1,5 +1,68 @@
 # Historial de cambios
 
+## 2.4.0-alpha.5
+
+- Herramienta reducida a dos modos claros: Restauración fiel y Restauración IA
+  HD.
+- Detección adaptativa de filtros de aplicación, tinte dominante, saturación
+  excesiva e iluminación plana.
+- Corrección cromática temporal con fuerza separada para fondo y persona.
+- Detección de logotipos pequeños asociados a texto y eliminación completa de
+  la sobreimpresión.
+- LaMa local para reconstruir trazos que cruzan piel o ropa; OpenCV conserva la
+  ruta rápida cuando el texto está solamente sobre el fondo.
+- Real-ESRGAN 2× local mediante DirectML para el modo IA HD.
+- Mezcla conservadora del resultado neuronal con el fotograma real: mayor
+  fuerza en fondo, menor en cuerpo y mínima en rostro.
+- Protección facial adicional con YuNet para bloquear cambios de identidad,
+  forma y proporciones.
+- Cola de un trabajo y mensajes de Telegram con estimación explícita de proceso
+  prolongado.
+- Instalador verificable para los modelos grandes guardados fuera de Git.
+- Eliminación durante desarrollo de motores x4 y conversiones x2 incompatibles
+  que producían mosaicos, suavizado excesivo o errores de carga.
+
+## 2.4.0-alpha.4
+
+- Sustitución del detector heurístico de bordes por PP-OCRv3 de OpenCV Zoo.
+- Protección fotograma por fotograma de rostro, cabello, manos y cuerpo con
+  PP-HumanSeg antes de construir cualquier máscara de texto.
+- Regla de identidad bloqueada: la reconstrucción nunca puede intersectar la
+  silueta humana protegida.
+- Eliminación del contraste local CLAHE y del enfoque global que amplificaban
+  grano, halos y defectos de compresión.
+- Limpieza y microenfoque suave aplicados solamente al fondo.
+- Codificación de restauraciones con libx264 `slow` para priorizar calidad.
+- Mensajes de Telegram con advertencia de proceso lento, etapa y porcentaje.
+- Modelos ONNX locales, huellas SHA-256 y licencia Apache 2.0 documentados.
+- Pruebas de exclusión de personas, modelos DNN, progreso, audio, dimensiones
+  y procesamiento integral.
+
+## 2.4.0-alpha.3
+
+- Nuevo comando `/restorevideo` y acceso desde el menú de mejoras.
+- Tres acabados: Natural, Natural HD y Natural HD+.
+- Revisión de todos los fotogramas para detectar trazos de texto sobrepuesto.
+- Reconstrucción conservadora mediante máscaras e inpainting de OpenCV.
+- Protección que descarta máscaras superiores al porcentaje configurado.
+- Balance de blancos y saturación suavizados entre fotogramas.
+- Contraste local, reducción ligera de ruido y enfoque moderado.
+- Ampliación opcional de 720p a 1080p, sin 2K ni 4K.
+- Copia del audio original cuando su códec es compatible con MP4.
+- Codificación mediante NVENC únicamente después de una prueba real de capacidad,
+  con respaldo automático en libx264.
+- Pruebas unitarias de color, texto y dimensiones, más una prueba integral con
+  video y audio sintéticos.
+
+## 2.4.0-alpha.2
+
+- Menú interactivo de mejoras y nueva opción Super rápido 1080.
+- Cola independiente para tareas de mejora.
+- Escalado Lanczos con FFmpeg hasta 1080p.
+- Aceleración NVENC con respaldo libx264.
+- Recepción de videos normales y documentos de video desde Telegram.
+- Heartbeat y supervisor de proceso para mejorar la disponibilidad.
+
 ## 2.3.0
 
 - Cola global de descargas para varios usuarios con uno o más trabajadores configurables.
