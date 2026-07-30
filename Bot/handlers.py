@@ -426,7 +426,7 @@ async def handle_navigation(
     if not await _safe_answer_query(query):
         return
 
-    await query.edit_message_text(text, reply_markup=keyboard)
+    await _safe_edit_query_message(query, text, keyboard)
 
 
 async def _build_status_text(user_id: int) -> str:
@@ -2761,6 +2761,23 @@ async def _safe_answer_query(
     except TelegramError as error:
         logger.warning("No se pudo responder el callback: %s", error)
         return False
+
+
+async def _safe_edit_query_message(
+    query: Any,
+    text: str,
+    keyboard: InlineKeyboardMarkup,
+) -> bool:
+    """Edita el menú sin convertir un toque repetido en error global."""
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard)
+        return True
+    except BadRequest as error:
+        message = str(error)
+        if "Message is not modified" in message:
+            logger.debug("Botón repetido: el menú ya mostraba el mismo contenido.")
+            return False
+        raise
 
 
 async def _safe_edit(

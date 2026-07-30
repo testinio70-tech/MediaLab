@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from handlers import send_audio
+from telegram.error import BadRequest
+
+from handlers import _safe_edit_query_message, send_audio
 from services.audio_extractor import (
     AUDIO_MAX_DURATION_SECONDS,
     AudioDownloadResult,
@@ -39,6 +41,16 @@ class AudioExtractorTests(unittest.TestCase):
 
 
 class AudioDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_menu_button_is_safely_ignored(self) -> None:
+        query = MagicMock()
+        query.edit_message_text = AsyncMock(
+            side_effect=BadRequest("Message is not modified")
+        )
+
+        edited = await _safe_edit_query_message(query, "Mismo menú", MagicMock())
+
+        self.assertFalse(edited)
+
     async def test_audio_is_sent_as_telegram_audio(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             audio_path = Path(folder) / "sample.mp3"
