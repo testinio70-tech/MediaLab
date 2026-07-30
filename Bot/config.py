@@ -99,10 +99,12 @@ RESTORE_SUPERRES_MODEL = (
     RESTORE_AI_MODEL_FOLDER / "RealESRGAN" / "real_esrgan_x2.onnx"
 )
 HEARTBEAT_FILE = STATE_FOLDER / "heartbeat.json"
+WATCHER_DATABASE_FILE = STATE_FOLDER / "watchers.sqlite3"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
 TIKTOK_PHOTOS = TIKTOK_DOWNLOADS / "Photos"
 INSTAGRAM_DOWNLOADS = DOWNLOADS_FOLDER / "Instagram"
+FACEBOOK_DOWNLOADS = DOWNLOADS_FOLDER / "Facebook"
 
 load_dotenv(BOT_FOLDER / ".env")
 
@@ -133,6 +135,24 @@ MAX_JOBS_PER_USER = _read_int_env(
 )
 AUDIO_MAX_DURATION_SECONDS = _read_int_env(
     "AUDIO_MAX_DURATION_SECONDS", 30 * 60, minimum=60, maximum=4 * 60 * 60
+)
+WATCHER_TIKTOK_INTERVAL_SECONDS = _read_int_env(
+    "WATCHER_TIKTOK_INTERVAL_SECONDS", 10 * 60, minimum=300, maximum=24 * 60 * 60
+)
+WATCHER_META_INTERVAL_SECONDS = _read_int_env(
+    "WATCHER_META_INTERVAL_SECONDS", 20 * 60, minimum=600, maximum=24 * 60 * 60
+)
+WATCHER_MAX_PER_USER = _read_int_env(
+    "WATCHER_MAX_PER_USER", 20, minimum=1, maximum=100
+)
+WATCHER_MAX_DISCOVERED_POSTS = _read_int_env(
+    "WATCHER_MAX_DISCOVERED_POSTS", 8, minimum=1, maximum=25
+)
+WATCHER_MEDIA_RETENTION_SECONDS = _read_int_env(
+    "WATCHER_MEDIA_RETENTION_SECONDS", 5 * 60, minimum=60, maximum=24 * 60 * 60
+)
+WATCHER_DISCOVERY_TIMEOUT_SECONDS = _read_int_env(
+    "WATCHER_DISCOVERY_TIMEOUT_SECONDS", 90, minimum=15, maximum=300
 )
 
 FAST_QUEUE_MAX_SIZE = _read_int_env(

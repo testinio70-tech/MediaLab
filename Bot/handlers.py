@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
+import shlex
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -42,6 +44,8 @@ from config import (
     RESTORE_MAX_INPUT_MB,
     SEND_TIMEOUT,
     STATUS_MESSAGE_DELETE_DELAY,
+    WATCHER_META_INTERVAL_SECONDS,
+    WATCHER_TIKTOK_INTERVAL_SECONDS,
 )
 from engines.instagram.ytdlp import InstagramYTDLPEngine
 from engines.tiktok.tikwm import TikWMEngine
@@ -85,6 +89,8 @@ from services.video_restore import (
     VIDEO_RESTORER,
     RestorationProgress,
 )
+from services.watcher_database import WATCHER_DATABASE, Watcher
+from services.watcher_service import WATCHER_SERVICE
 from ui.menus import (
     audio_prompt,
     download_menu,
@@ -100,6 +106,8 @@ from ui.menus import (
     restoration_menu,
     restoration_prompt,
     status_keyboard,
+    watcher_create_prompt,
+    watcher_menu,
 )
 from utils import detect_platform, extract_first_url, format_file_size
 
@@ -204,6 +212,8 @@ async def restorevideo_command(
 
     context.user_data.pop("menu_mode", None)
     context.user_data.pop("restore_preset", None)
+    context.user_data.pop("watcher_step", None)
+    context.user_data.pop("watcher_draft", None)
     text, keyboard = restoration_menu()
     await message.reply_text(text, reply_markup=keyboard)
 
@@ -222,6 +232,70 @@ async def audio_command(
 
     context.user_data["menu_mode"] = "audio"
     text, keyboard = audio_prompt()
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def watcher_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+    message = update.effective_message
+    if message is None:
+        return
+    context.user_data["watcher_step"] = "title"
+    context.user_data.pop("watcher_draft", None)
+    text, keyboard = watcher_create_prompt("title")
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def watchers_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+    user = update.effective_user
+    message = update.effective_message
+    if user is None or message is None:
+        return
+    text, keyboard = await _watcher_list_view(user.id)
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def sendwatcher_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Formato avanzado: /sendwatcher "Título" tiktok instagram facebook."""
+    if not _is_authorized(update):
+        await _reject_unauthorized(update)
+        return
+    message = update.effective_message
+    if message is None or message.text is None:
+        return
+    try:
+        parts = shlex.split(message.text, posix=True)
+    except ValueError:
+        parts = []
+    if len(parts) != 5:
+        await message.reply_text(
+            "Formato avanzado:\n\n"
+            '/sendwatcher "Título" <TikTok> <Instagram> <Facebook>\n\n'
+            "Usa - para omitir una red. Después te pediré el destino de Telegram."
+        )
+        return
+    title = parts[1].strip()
+    sources = _normalize_watcher_sources(parts[2:])
+    if not sources:
+        await message.reply_text("❌ Debes indicar al menos una red social válida.")
+        return
+    context.user_data["watcher_step"] = "destination"
+    context.user_data["watcher_draft"] = {"title": title, "sources": sources}
+    text, keyboard = watcher_create_prompt("destination")
     await message.reply_text(text, reply_markup=keyboard)
 
 
@@ -277,6 +351,8 @@ async def cancel_command(
     pending.clear()
     context.user_data.pop("menu_mode", None)
     context.user_data.pop("restore_preset", None)
+    context.user_data.pop("watcher_step", None)
+    context.user_data.pop("watcher_draft", None)
 
     if pending_count:
         await message.reply_text(
@@ -350,6 +426,44 @@ async def handle_navigation(
     elif data == "menu:audio":
         context.user_data["menu_mode"] = "audio"
         text, keyboard = audio_prompt()
+    elif data == "watcher:menu":
+        text, keyboard = watcher_menu()
+    elif data == "watcher:create":
+        context.user_data["watcher_step"] = "title"
+        context.user_data.pop("watcher_draft", None)
+        text, keyboard = watcher_create_prompt("title")
+    elif data == "watcher:cancel":
+        context.user_data.pop("watcher_step", None)
+        context.user_data.pop("watcher_draft", None)
+        text, keyboard = watcher_menu()
+    elif data == "watcher:list":
+        text, keyboard = await _watcher_list_view(user.id)
+    elif data == "watcher:check":
+        watchers = await WATCHER_DATABASE.list_for_user(user.id)
+        for watcher in watchers:
+            if watcher.enabled:
+                asyncio.create_task(
+                    WATCHER_SERVICE.check_watcher(watcher.id),
+                    name=f"watcher-manual-check-{watcher.id}",
+                )
+        text, keyboard = watcher_menu()
+        text += "\n\n🔎 Revisión manual iniciada para tus watchers activos."
+    elif data.startswith("watcher:toggle:"):
+        watcher_id = int(data.rsplit(":", 1)[-1])
+        watcher = await WATCHER_DATABASE.watcher(watcher_id)
+        if watcher is None or watcher.owner_user_id != user.id:
+            await _safe_answer_query(query, text="Watcher no encontrado.", show_alert=True)
+            return
+        await WATCHER_DATABASE.set_enabled(watcher_id, not watcher.enabled)
+        text, keyboard = await _watcher_list_view(user.id)
+    elif data.startswith("watcher:delete:"):
+        watcher_id = int(data.rsplit(":", 1)[-1])
+        watcher = await WATCHER_DATABASE.watcher(watcher_id)
+        if watcher is None or watcher.owner_user_id != user.id:
+            await _safe_answer_query(query, text="Watcher no encontrado.", show_alert=True)
+            return
+        await WATCHER_DATABASE.delete(watcher_id)
+        text, keyboard = await _watcher_list_view(user.id)
     elif data == "menu:enhance":
         text, keyboard = enhancement_menu()
     elif data == "menu:restore":
@@ -435,6 +549,7 @@ async def _build_status_text(user_id: int) -> str:
     image_active, image_waiting = await IMAGE_QUEUE.snapshot()
     download_status = await DOWNLOAD_QUEUE.user_snapshot(user_id)
     fast_status = await ENHANCEMENT_QUEUE.user_snapshot(user_id)
+    watcher_count = await WATCHER_DATABASE.count_for_user(user_id)
 
     personal_lines: list[str] = []
 
@@ -481,6 +596,7 @@ async def _build_status_text(user_id: int) -> str:
         "Cola Foto IA:\n"
         f"• Activas: {image_active}\n"
         f"• Esperando: {image_waiting}\n\n"
+        f"👁 Auto-watchers configurados: {watcher_count}\n\n"
         f"{personal}"
     )
 
@@ -1361,6 +1477,152 @@ def _telegram_duration_seconds(value: Any) -> float:
         return 0.0
 
 
+def _normalize_watcher_sources(values: list[str]) -> list[tuple[str, str, int]]:
+    expected = ("tiktok", "instagram", "facebook")
+    sources: list[tuple[str, str, int]] = []
+    for platform, raw in zip(expected, values):
+        value = raw.strip()
+        if not value or value == "-":
+            continue
+        detected = detect_platform(value)
+        if detected != platform:
+            continue
+        clean = value.split("?", 1)[0].rstrip("/")
+        interval = (
+            WATCHER_TIKTOK_INTERVAL_SECONDS
+            if platform == "tiktok"
+            else WATCHER_META_INTERVAL_SECONDS
+        )
+        sources.append((platform, clean, interval))
+    return sources
+
+
+def _normalize_watcher_destination(value: str) -> str | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("https://t.me/"):
+        cleaned = "@" + cleaned.rsplit("/", 1)[-1].split("?", 1)[0]
+    if cleaned.startswith("@") and re.fullmatch(r"@[A-Za-z0-9_]{3,64}", cleaned):
+        return cleaned
+    if re.fullmatch(r"-?\d{5,20}", cleaned):
+        return cleaned
+    return None
+
+
+async def _handle_watcher_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or message.text is None or user is None:
+        return
+    step = str(context.user_data.get("watcher_step") or "")
+    value = message.text.strip()
+    draft = context.user_data.setdefault("watcher_draft", {})
+
+    if step == "title":
+        if len(value) < 2 or len(value) > 100:
+            await message.reply_text("❌ El título debe tener entre 2 y 100 caracteres.")
+            return
+        draft["title"] = value
+        context.user_data["watcher_step"] = "tiktok"
+    elif step in {"tiktok", "instagram", "facebook"}:
+        expected = ("tiktok", "instagram", "facebook")
+        index = expected.index(step)
+        values = list(draft.get("links") or ["-", "-", "-"])
+        if value != "-" and detect_platform(value) != step:
+            await message.reply_text(
+                f"❌ Ese enlace no parece ser de {step.title()}. "
+                "Envía el perfil correcto o escribe `-`.",
+            )
+            return
+        values[index] = value
+        draft["links"] = values
+        next_step = expected[index + 1] if index + 1 < len(expected) else "destination"
+        context.user_data["watcher_step"] = next_step
+    elif step == "destination":
+        destination = _normalize_watcher_destination(value)
+        if destination is None:
+            await message.reply_text(
+                "❌ Destino no válido. Usa @canal, un ID numérico o un enlace t.me.",
+            )
+            return
+        links = list(draft.get("links") or ["-", "-", "-"])
+        sources = list(draft.get("sources") or [])
+        if not sources:
+            sources = _normalize_watcher_sources(links)
+        if not sources:
+            await message.reply_text("❌ El watcher necesita al menos una red válida.")
+            context.user_data.pop("watcher_step", None)
+            context.user_data.pop("watcher_draft", None)
+            return
+        try:
+            watcher = await WATCHER_SERVICE.create_watcher(
+                user.id,
+                str(draft.get("title") or "Watcher"),
+                destination,
+                sources,
+            )
+        except Exception as error:
+            await message.reply_text(f"❌ No se pudo crear el watcher: {error}")
+            return
+        context.user_data.pop("watcher_step", None)
+        context.user_data.pop("watcher_draft", None)
+        await message.reply_text(
+            "✅ Watcher creado\n\n"
+            f"👁 {watcher.title}\n"
+            f"📤 Destino: {watcher.destination}\n"
+            "🔎 La primera revisión crea una línea base; solo se enviarán publicaciones nuevas."
+        )
+        return
+    else:
+        return
+
+    text, keyboard = watcher_create_prompt(context.user_data["watcher_step"])
+    await message.reply_text(text, reply_markup=keyboard)
+
+
+async def _watcher_list_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    watchers = await WATCHER_DATABASE.list_for_user(user_id)
+    if not watchers:
+        return (
+            "📋 No tienes auto-watchers todavía.",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("➕ Crear watcher", callback_data="watcher:create")],
+                 [InlineKeyboardButton("↩️ Volver", callback_data="watcher:menu")]]
+            ),
+        )
+    sources = await WATCHER_DATABASE.sources_for_watchers([item.id for item in watchers])
+    by_watcher: dict[int, list[Any]] = {}
+    for source in sources:
+        by_watcher.setdefault(source.watcher_id, []).append(source)
+    lines = ["📋 Tus auto-watchers\n"]
+    rows: list[list[InlineKeyboardButton]] = []
+    for watcher in watchers:
+        status = "🟢 activo" if watcher.enabled else "⏸ pausado"
+        names = ", ".join(source.platform.title() for source in by_watcher.get(watcher.id, []))
+        lines.append(
+            f"{watcher.id}. {status} · {watcher.title}\n"
+            f"   Redes: {names}\n"
+            f"   Destino: {watcher.destination}"
+        )
+        rows.append([
+            InlineKeyboardButton(
+                "⏸ Pausar" if watcher.enabled else "▶️ Reanudar",
+                callback_data=f"watcher:toggle:{watcher.id}",
+            ),
+            InlineKeyboardButton("🗑 Eliminar", callback_data=f"watcher:delete:{watcher.id}"),
+        ])
+    rows.extend([
+        [InlineKeyboardButton("➕ Crear watcher", callback_data="watcher:create")],
+        [InlineKeyboardButton("🔄 Actualizar", callback_data="watcher:list")],
+        [InlineKeyboardButton("↩️ Volver", callback_data="watcher:menu")],
+    ])
+    return "\n\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 async def _enqueue_fast1080(
     *,
     user_id: int,
@@ -1958,6 +2220,10 @@ async def handle_link(
     message = update.effective_message
     user = update.effective_user
     if message is None or message.text is None or user is None:
+        return
+
+    if context.user_data.get("watcher_step"):
+        await _handle_watcher_input(update, context)
         return
 
     url = extract_first_url(message.text)

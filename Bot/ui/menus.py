@@ -18,6 +18,7 @@ def main_menu(
             InlineKeyboardButton("📊 Mis trabajos", callback_data="menu:status"),
             InlineKeyboardButton("❓ Ayuda", callback_data="menu:help"),
         ],
+        [InlineKeyboardButton("👁 Auto-watchers", callback_data="watcher:menu")],
     ]
     if privileged:
         rows.append(
@@ -86,6 +87,46 @@ def enhancement_menu() -> tuple[str, InlineKeyboardMarkup]:
             ],
             [InlineKeyboardButton("↩️ Menú principal", callback_data="menu:main")],
         ]
+    )
+    return text, keyboard
+
+
+def watcher_menu() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "👁 Auto-watchers\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "Vigila perfiles de TikTok, Instagram y Facebook y recibe cada "
+        "publicación nueva automáticamente.\n\n"
+        "⏱️ TikTok: cada 10 minutos\n"
+        "⏱️ Instagram/Facebook: cada 20 minutos\n"
+        "🔐 Se probarán cookies autorizadas antes de marcar un perfil como inaccesible."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Crear watcher", callback_data="watcher:create")],
+            [InlineKeyboardButton("📋 Mis watchers", callback_data="watcher:list")],
+            [InlineKeyboardButton("🧪 Comprobar ahora", callback_data="watcher:check")],
+            [InlineKeyboardButton("↩️ Menú principal", callback_data="menu:main")],
+        ]
+    )
+    return text, keyboard
+
+
+def watcher_create_prompt(step: str) -> tuple[str, InlineKeyboardMarkup]:
+    prompts = {
+        "title": "Escribe el título de tu watcher.",
+        "tiktok": "Envía el perfil de TikTok o escribe `-` para omitirlo.",
+        "instagram": "Envía el perfil de Instagram o escribe `-` para omitirlo.",
+        "facebook": "Envía el perfil o página de Facebook o escribe `-` para omitirlo.",
+        "destination": (
+            "¿Dónde envío las publicaciones?\n\n"
+            "Envía @nombre_del_canal o el ID numérico del chat.\n"
+            "El bot debe estar dentro del grupo o ser administrador del canal."
+        ),
+    }
+    text = "👁 Crear watcher\n\n" + prompts.get(step, prompts["title"])
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancelar", callback_data="watcher:cancel")]]
     )
     return text, keyboard
 
@@ -329,6 +370,7 @@ def help_menu() -> tuple[str, InlineKeyboardMarkup]:
             [InlineKeyboardButton("⚠️ Errores frecuentes", callback_data="help:errors")],
             [InlineKeyboardButton("🔐 Privacidad", callback_data="help:privacy")],
             [InlineKeyboardButton("📋 Comandos", callback_data="help:commands")],
+            [InlineKeyboardButton("👁 Auto-watchers", callback_data="help:watchers")],
             [InlineKeyboardButton("↩️ Menú principal", callback_data="menu:main")],
         ]
     )
@@ -389,11 +431,22 @@ def help_section(section: str) -> tuple[str, InlineKeyboardMarkup]:
             "/start — Abrir MediaLab\n"
             "/menu — Abrir el menú principal\n"
             "/audio — Abrir la extracción MP3\n"
+            "/watcher — Crear un auto-watcher con botones\n"
+            "/sendwatcher — Crear watcher con formato avanzado\n"
+            "/watchers — Ver y administrar tus watchers\n"
             "/restorevideo — Restaurar cada fotograma y retirar texto seguro\n"
             "/status — Ver el estado de tus trabajos\n"
             "/cancel — Cancelar selecciones pendientes\n"
             "/help — Abrir esta ayuda\n"
             "/health — Estado técnico para superusuarios"
+        ),
+        "watchers": (
+            "👁 Auto-watchers\n\n"
+            "TikTok se revisa cada 10 minutos e Instagram/Facebook cada 20.\n"
+            "La primera revisión crea una línea base para no enviar contenido antiguo.\n"
+            "Los temporales se eliminan después de enviarse.\n\n"
+            "TikTok utiliza TikWM; Instagram y Facebook prueban cookies autorizadas "
+            "cuando están disponibles."
         ),
     }
     text = sections.get(section, "❌ Sección de ayuda desconocida.")

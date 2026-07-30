@@ -32,12 +32,16 @@ from handlers import (
     restorevideo_command,
     start,
     status_command,
+    sendwatcher_command,
+    watcher_command,
+    watchers_command,
 )
 from services.download_queue import DOWNLOAD_QUEUE
 from services.enhancement_queue import ENHANCEMENT_QUEUE
 from services.file_cleanup import periodic_cleanup_loop
 from services.heartbeat import HEARTBEAT_SERVICE
 from services.image_queue import IMAGE_QUEUE
+from services.watcher_service import WATCHER_SERVICE
 
 
 logging.basicConfig(
@@ -125,6 +129,7 @@ async def post_init(application: Application) -> None:
     await DOWNLOAD_QUEUE.start()
     await ENHANCEMENT_QUEUE.start()
     await IMAGE_QUEUE.start()
+    await WATCHER_SERVICE.start(application.bot)
     await HEARTBEAT_SERVICE.start()
 
     cleanup_task = asyncio.create_task(
@@ -138,6 +143,9 @@ async def post_init(application: Application) -> None:
             BotCommand("start", "Abrir MediaLab"),
             BotCommand("menu", "Abrir el menú principal"),
             BotCommand("audio", "Extraer MP3 de YouTube o TikTok"),
+            BotCommand("watcher", "Crear un auto-watcher con botones"),
+            BotCommand("sendwatcher", "Crear watcher con formato avanzado"),
+            BotCommand("watchers", "Ver y administrar tus watchers"),
             BotCommand("restorevideo", "Restaurar color y eliminar textos"),
             BotCommand("status", "Ver el estado de tus trabajos"),
             BotCommand("cancel", "Cancelar una selección pendiente"),
@@ -153,6 +161,7 @@ async def post_init(application: Application) -> None:
 async def post_stop(application: Application) -> None:
     await HEARTBEAT_SERVICE.stop()
     await IMAGE_QUEUE.stop()
+    await WATCHER_SERVICE.stop()
     await ENHANCEMENT_QUEUE.stop()
     await DOWNLOAD_QUEUE.stop()
 
@@ -177,6 +186,9 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("audio", audio_command))
+    application.add_handler(CommandHandler("watcher", watcher_command))
+    application.add_handler(CommandHandler("sendwatcher", sendwatcher_command))
+    application.add_handler(CommandHandler("watchers", watchers_command))
     application.add_handler(CommandHandler("restorevideo", restorevideo_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -191,7 +203,7 @@ def build_application() -> Application:
     application.add_handler(
         CallbackQueryHandler(
             handle_navigation,
-            pattern=r"^(menu|help|restore|photo):",
+            pattern=r"^(menu|help|restore|photo|watcher):",
         )
     )
     application.add_handler(
