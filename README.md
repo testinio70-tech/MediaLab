@@ -1,6 +1,6 @@
 # MediaLab
 
-Bot modular de descarga multimedia para Telegram. MediaLab 2.3.0 admite TikTok e Instagram, incorpora una cola global para varios usuarios y mantiene la limpieza de archivos únicamente en consola.
+Bot modular de descarga y mejora multimedia para Telegram. MediaLab 2.4.0-alpha.5 admite TikTok e Instagram, incorpora colas separadas para descargas y mejoras, y añade restauración integral protegida de video hasta 1080p.
 
 ## Plataformas y contenido
 
@@ -17,6 +17,47 @@ Bot modular de descarga multimedia para Telegram. MediaLab 2.3.0 admite TikTok e
 - Videos `/tv/`.
 - Carruseles de fotos, videos o contenido mixto.
 - No descarga perfiles completos.
+
+## Restauración integral de video
+
+El comando `/restorevideo` abre una herramienta experimental que procesa todos los
+fotogramas del video:
+
+- detecta regiones de texto con PP-OCRv3 y OpenCV DNN;
+- incluye logos pequeños asociados y elimina el texto confirmado completo;
+- segmenta la persona con PP-HumanSeg y detecta rostros con YuNet;
+- usa LaMa solo en las zonas de texto que cruzan cuerpo o ropa;
+- interpola texto facial sin un modelo generativo de rostros;
+- detecta filtros cromáticos y corrige temporalmente temperatura, balance de
+  blancos, iluminación y saturación;
+- limpia ruido y recupera microdetalle de forma conservadora;
+- conserva las dimensiones originales en **Restauración fiel**;
+- usa Real-ESRGAN 2× con mezcla limitada en persona y rostro para producir
+  hasta 1920×1080 o 1080×1920 en **Restauración IA HD**;
+- copia el audio original cuando su códec es compatible con MP4;
+- muestra el avance fotograma por fotograma en Telegram.
+
+Los dos acabados disponibles son:
+
+```text
+Restauración fiel  -> texto/logos + color natural + tamaño original
+Restauración IA HD -> lo anterior + detalle IA y salida máxima 1080p
+```
+
+La reconstrucción queda limitada a la máscara estrecha del texto. El rostro no
+usa restauración facial generativa y recibe una contribución mínima del
+superescalador para conservar la identidad. Si un rótulo cubre píxeles faciales,
+no existe información original debajo: MediaLab interpola el vecindario de
+forma conservadora en vez de inventar facciones.
+
+Un video extremadamente pequeño o pixelado puede limpiarse y ampliarse, pero no
+contiene detalle real suficiente para recuperar una cara perdida. El modo IA HD
+mejora bordes y texturas visibles, pero no presenta estimaciones como si fueran
+información original.
+
+La cola ejecuta una sola restauración a la vez. El modo IA HD trabaja fotograma
+por fotograma y, en el equipo de referencia, puede tardar entre 1 y 6 horas por
+cada minuto de video según sus FPS y cuánto texto cruce a la persona.
 
 ## Cola multiusuario
 
@@ -45,7 +86,7 @@ Enviando a Telegram
 Completado
 ```
 
-Después de un envío exitoso, el mensaje temporal se elimina y únicamente permanece el contenido descargado.
+Después de un envío exitoso, el mensaje temporal se elimina y únicamente permanece el contenido descargado. Las mejoras utilizan una cola separada de un trabajador para no saturar CPU o GPU.
 
 ## Calidad de Instagram
 
@@ -84,10 +125,13 @@ C:\MediaLab
 │   │       └── ytdlp.py
 │   └── services
 │       ├── download_queue.py
+│       ├── enhancement_queue.py
 │       ├── file_cleanup.py
 │       ├── instagram.py
 │       ├── tiktok_photos.py
-│       └── tiktok_urls.py
+│       ├── tiktok_urls.py
+│       ├── video_fast1080.py
+│       └── video_restore.py
 ├── Cookies
 ├── Downloads
 │   ├── Instagram
@@ -103,6 +147,7 @@ Dentro del entorno virtual:
 cd C:\MediaLab\Bot
 & .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade -r requirements.txt
+python setup_restore_models.py
 ```
 
 Dependencias principales:
@@ -113,6 +158,8 @@ python-dotenv>=1.2.2,<2
 requests>=2.34.2,<3
 yt-dlp[default,curl-cffi]>=2026.7.4
 gallery-dl>=1.32.8,<2
+numpy>=2.2,<3
+opencv-python-headless>=4.13,<5
 ```
 
 ## Configuración `.env`
@@ -124,12 +171,22 @@ TELEGRAM_PRIVILEGED_USER_IDS=123456789
 DOWNLOAD_QUEUE_MAX_SIZE=10
 DOWNLOAD_QUEUE_WORKERS=1
 MAX_JOBS_PER_USER=1
+FAST_QUEUE_MAX_SIZE=5
+FAST_QUEUE_WORKERS=1
+RESTORE_MAX_INPUT_MB=20
+RESTORE_MAX_DURATION_SECONDS=60
+RESTORE_TARGET_SIZE_MB=44
+RESTORE_PROCESS_TIMEOUT_SECONDS=1800
+RESTORE_MAX_TEXT_MASK_PERCENT=10
+RESTORE_TEXT_CONFIDENCE=0.68
+RESTORE_PERSON_PROTECTION_PERCENT=1.5
 STATUS_MESSAGE_DELETE_DELAY=2
 INSTAGRAM_SEND_ORIGINALS_AS_DOCUMENTS=true
+FFMPEG_BINARY=ffmpeg
 FFPROBE_BINARY=ffprobe
 ```
 
-`TELEGRAM_PRIVILEGED_USER_IDS` queda preparado para funciones futuras como Stories o herramientas administrativas. MediaLab 2.3.0 no habilita descargas masivas ni perfiles completos.
+`TELEGRAM_PRIVILEGED_USER_IDS` queda preparado para funciones futuras como Stories o herramientas administrativas. MediaLab 2.4.0-alpha.5 no habilita descargas masivas ni perfiles completos.
 
 ## Cookies opcionales
 
@@ -193,6 +250,8 @@ Tiempo de descarga: 10 minutos
 Capacidad de cola: 10 trabajos
 Trabajadores predeterminados: 1
 Trabajos por usuario: 1
+Entrada de restauración: 20 MB y 60 segundos
+Salida de restauración: máximo 1080p y objetivo de 44 MB
 ```
 
 ## Pruebas mínimas antes de integrar
@@ -207,3 +266,6 @@ Trabajos por usuario: 1
 8. Mismo usuario repitiendo el mismo enlace.
 9. Confirmar que la limpieza solo aparezca en consola.
 10. Confirmar que `git status` no incluya descargas, cookies ni `.env`.
+11. `/restorevideo` con los acabados Natural, Natural HD y Natural HD+.
+12. Video de prueba con texto sobrepuesto, dominante cálida y audio.
+13. Confirmar que el resultado no supere 1080p ni pierda sincronización.

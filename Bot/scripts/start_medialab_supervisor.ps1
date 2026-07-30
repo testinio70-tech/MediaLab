@@ -73,6 +73,34 @@ function Stop-MediaLabProcessTree {
     }
 }
 
+function Test-ProcessTreeContainsPid {
+    param(
+        [Parameter(Mandatory)][int]$RootProcessId,
+        [Parameter(Mandatory)][int]$CandidateProcessId
+    )
+
+    $currentProcessId = $CandidateProcessId
+    $visited = New-Object "System.Collections.Generic.HashSet[int]"
+
+    while ($currentProcessId -gt 0 -and $visited.Add($currentProcessId)) {
+        if ($currentProcessId -eq $RootProcessId) {
+            return $true
+        }
+
+        try {
+            $processInfo = Get-CimInstance Win32_Process `
+                -Filter "ProcessId = $currentProcessId" `
+                -ErrorAction Stop
+            $currentProcessId = [int]$processInfo.ParentProcessId
+        }
+        catch {
+            return $false
+        }
+    }
+
+    return $false
+}
+
 function Test-HeartbeatStale {
     param(
         [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
@@ -85,7 +113,14 @@ function Test-HeartbeatStale {
 
     try {
         $heartbeat = Get-Content -LiteralPath $heartbeatPath -Raw | ConvertFrom-Json
-        if ([int]$heartbeat.pid -ne $Process.Id) {
+        $heartbeatPid = [int]$heartbeat.pid
+        if (-not (Test-ProcessTreeContainsPid `
+            -RootProcessId $Process.Id `
+            -CandidateProcessId $heartbeatPid)) {
+            Write-SupervisorLog (
+                "Heartbeat pertenece a un proceso ajeno: PID $heartbeatPid; " +
+                "se comprobará la antigüedad del proceso supervisado."
+            )
             return ((Get-Date) - $Process.StartTime).TotalSeconds -ge $StaleSeconds
         }
 

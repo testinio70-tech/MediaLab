@@ -78,11 +78,33 @@ LOGS_FOLDER = ROOT / "Logs"
 TEMP_FOLDER = BOT_FOLDER / "temp"
 CACHE_FOLDER = BOT_FOLDER / "cache"
 STATE_FOLDER = BOT_FOLDER / "state"
+FAST1080_FOLDER = TEMP_FOLDER / "Fast1080"
+RESTORE_FOLDER = TEMP_FOLDER / "RestoreHD"
+PHOTO_AI_FOLDER = TEMP_FOLDER / "PhotoAI"
+AUDIO_DOWNLOADS = DOWNLOADS_FOLDER / "Audio"
+MODEL_FOLDER = BOT_FOLDER / "models"
+TOOLS_FOLDER = ROOT / "Tools"
+RESTORE_AI_MODEL_FOLDER = TOOLS_FOLDER / "Models"
+RESTORE_TEXT_MODEL = (
+    MODEL_FOLDER / "text_detection_en_ppocrv3_2023may.onnx"
+)
+RESTORE_PERSON_MODEL = (
+    MODEL_FOLDER / "human_segmentation_pphumanseg_2023mar.onnx"
+)
+RESTORE_FACE_MODEL = MODEL_FOLDER / "face_detection_yunet_2023mar.onnx"
+RESTORE_INPAINT_MODEL = (
+    RESTORE_AI_MODEL_FOLDER / "LaMa" / "inpainting_lama_2025jan.onnx"
+)
+RESTORE_SUPERRES_MODEL = (
+    RESTORE_AI_MODEL_FOLDER / "RealESRGAN" / "real_esrgan_x2.onnx"
+)
 HEARTBEAT_FILE = STATE_FOLDER / "heartbeat.json"
+WATCHER_DATABASE_FILE = STATE_FOLDER / "watchers.sqlite3"
 
 TIKTOK_DOWNLOADS = DOWNLOADS_FOLDER / "TikTok"
 TIKTOK_PHOTOS = TIKTOK_DOWNLOADS / "Photos"
 INSTAGRAM_DOWNLOADS = DOWNLOADS_FOLDER / "Instagram"
+FACEBOOK_DOWNLOADS = DOWNLOADS_FOLDER / "Facebook"
 
 load_dotenv(BOT_FOLDER / ".env")
 
@@ -109,8 +131,95 @@ DOWNLOAD_QUEUE_WORKERS = _read_int_env(
     "DOWNLOAD_QUEUE_WORKERS", 1, minimum=1, maximum=4
 )
 MAX_JOBS_PER_USER = _read_int_env(
-    "MAX_JOBS_PER_USER", 1, minimum=1, maximum=10
+    "MAX_JOBS_PER_USER", 3, minimum=1, maximum=10
 )
+AUDIO_MAX_DURATION_SECONDS = _read_int_env(
+    "AUDIO_MAX_DURATION_SECONDS", 30 * 60, minimum=60, maximum=4 * 60 * 60
+)
+WATCHER_TIKTOK_INTERVAL_SECONDS = _read_int_env(
+    "WATCHER_TIKTOK_INTERVAL_SECONDS", 10 * 60, minimum=300, maximum=24 * 60 * 60
+)
+WATCHER_META_INTERVAL_SECONDS = _read_int_env(
+    "WATCHER_META_INTERVAL_SECONDS", 20 * 60, minimum=600, maximum=24 * 60 * 60
+)
+WATCHER_MAX_PER_USER = _read_int_env(
+    "WATCHER_MAX_PER_USER", 20, minimum=1, maximum=100
+)
+WATCHER_MAX_DISCOVERED_POSTS = _read_int_env(
+    "WATCHER_MAX_DISCOVERED_POSTS", 8, minimum=1, maximum=25
+)
+WATCHER_MEDIA_RETENTION_SECONDS = _read_int_env(
+    "WATCHER_MEDIA_RETENTION_SECONDS", 5 * 60, minimum=60, maximum=24 * 60 * 60
+)
+WATCHER_DISCOVERY_TIMEOUT_SECONDS = _read_int_env(
+    "WATCHER_DISCOVERY_TIMEOUT_SECONDS", 90, minimum=15, maximum=300
+)
+
+FAST_QUEUE_MAX_SIZE = _read_int_env(
+    "FAST_QUEUE_MAX_SIZE", 5, minimum=1, maximum=20
+)
+FAST_QUEUE_WORKERS = _read_int_env(
+    "FAST_QUEUE_WORKERS", 1, minimum=1, maximum=2
+)
+FAST_MAX_JOBS_PER_USER = _read_int_env(
+    "FAST_MAX_JOBS_PER_USER", 1, minimum=1, maximum=3
+)
+PHOTO_QUEUE_MAX_SIZE = _read_int_env(
+    "PHOTO_QUEUE_MAX_SIZE", 5, minimum=1, maximum=20
+)
+PHOTO_QUEUE_WORKERS = _read_int_env(
+    "PHOTO_QUEUE_WORKERS", 1, minimum=1, maximum=1
+)
+PHOTO_MAX_JOBS_PER_USER = _read_int_env(
+    "PHOTO_MAX_JOBS_PER_USER", 1, minimum=1, maximum=3
+)
+PHOTO_AI_MAX_BATCH = 10
+PHOTO_AI_MAX_INPUT_MB = _read_int_env(
+    "PHOTO_AI_MAX_INPUT_MB", 10, minimum=1, maximum=20
+)
+PHOTO_AI_MAX_INPUT_BYTES = PHOTO_AI_MAX_INPUT_MB * 1024 * 1024
+PHOTO_AI_MAX_DIMENSION = _read_int_env(
+    "PHOTO_AI_MAX_DIMENSION", 4096, minimum=1024, maximum=8192
+)
+FAST1080_MAX_INPUT_MB = _read_int_env(
+    "FAST1080_MAX_INPUT_MB", 20, minimum=1, maximum=20
+)
+FAST1080_MAX_INPUT_BYTES = FAST1080_MAX_INPUT_MB * 1024 * 1024
+FAST1080_MAX_DURATION_SECONDS = _read_int_env(
+    "FAST1080_MAX_DURATION_SECONDS", 60, minimum=1, maximum=600
+)
+FAST1080_TARGET_SIZE_MB = _read_int_env(
+    "FAST1080_TARGET_SIZE_MB", 44, minimum=5, maximum=48
+)
+FAST1080_TARGET_SIZE_BYTES = FAST1080_TARGET_SIZE_MB * 1024 * 1024
+FAST1080_PROCESS_TIMEOUT_SECONDS = _read_int_env(
+    "FAST1080_PROCESS_TIMEOUT_SECONDS", 900, minimum=60, maximum=7200
+)
+
+RESTORE_MAX_INPUT_MB = _read_int_env(
+    "RESTORE_MAX_INPUT_MB", 20, minimum=1, maximum=20
+)
+RESTORE_MAX_INPUT_BYTES = RESTORE_MAX_INPUT_MB * 1024 * 1024
+RESTORE_MAX_DURATION_SECONDS = _read_int_env(
+    "RESTORE_MAX_DURATION_SECONDS", 60, minimum=1, maximum=600
+)
+RESTORE_TARGET_SIZE_MB = _read_int_env(
+    "RESTORE_TARGET_SIZE_MB", 44, minimum=5, maximum=48
+)
+RESTORE_TARGET_SIZE_BYTES = RESTORE_TARGET_SIZE_MB * 1024 * 1024
+RESTORE_PROCESS_TIMEOUT_SECONDS = _read_int_env(
+    "RESTORE_PROCESS_TIMEOUT_SECONDS", 1800, minimum=60, maximum=14400
+)
+RESTORE_MAX_TEXT_MASK_PERCENT = _read_float_env(
+    "RESTORE_MAX_TEXT_MASK_PERCENT", 10.0, minimum=1.0, maximum=25.0
+)
+RESTORE_TEXT_CONFIDENCE = _read_float_env(
+    "RESTORE_TEXT_CONFIDENCE", 0.68, minimum=0.30, maximum=0.98
+)
+RESTORE_PERSON_PROTECTION_PERCENT = _read_float_env(
+    "RESTORE_PERSON_PROTECTION_PERCENT", 1.5, minimum=0.5, maximum=5.0
+)
+
 STATUS_MESSAGE_DELETE_DELAY = _read_float_env(
     "STATUS_MESSAGE_DELETE_DELAY", 2.0, minimum=0.0, maximum=60.0
 )
@@ -138,7 +247,8 @@ SUPERVISOR_RESTART_WINDOW_SECONDS = _read_int_env(
     "SUPERVISOR_RESTART_WINDOW_SECONDS", 600, minimum=60, maximum=86400
 )
 
+FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg"
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe").strip() or "ffprobe"
 
 APP_NAME = "MediaLab"
-APP_VERSION = "2.4.0-alpha.1"
+APP_VERSION = "2.4.0-alpha.5"
